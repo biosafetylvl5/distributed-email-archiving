@@ -1,0 +1,40 @@
+name = "newsletter-ingest"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+workers_dev = false
+
+# Private bucket holding raw + processed archive (created by Terraform).
+[[r2_buckets]]
+binding = "ARCHIVE"
+bucket_name = "newsletter-archive"
+
+# Run `wrangler kv namespace create <NAME>` (or `terraform apply`) and paste
+# the resulting ids below before first deploy.
+[[kv_namespaces]]
+binding = "USERS"
+id = "CHANGE_ME"
+
+[[kv_namespaces]]
+binding = "TAGS"
+id = "CHANGE_ME"
+
+[[kv_namespaces]]
+binding = "RATELIMIT"
+id = "CHANGE_ME"
+
+[vars]
+# "strict": unknown tags are rejected at SMTP time
+# "quarantine": unknown tags are captured into incoming/quarantine/
+POLICY_MODE = "strict"
+# must be a verified Email Routing destination.
+BACKUP_MAILBOX = "CHANGE_ME"
+# subdomain mail is received at
+# the zone catch-all is zone-wide, so the worker rejects anything not addressed to this domain.
+ARCHIVE_DOMAIN = "CHANGE_ME"
+MAX_RAW_BYTES = "26214400"
+GLOBAL_DAILY_CAP = "500"
+TAG_DAILY_CAP = "50"
+UNTAGGED_DAILY_CAP = "10"
+
+[observability]
+enabled = true
