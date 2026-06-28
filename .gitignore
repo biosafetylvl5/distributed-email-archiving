@@ -2,3 +2,5 @@ wrangler.toml
 .wranger/*
 .wrangler/**
 **/.wrangler
+**/.terraform*
+.terraform*

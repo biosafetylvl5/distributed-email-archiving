@@ -2,14 +2,14 @@
 # Dump the TAGS KV namespace to a JSON file
 #   ./export-tags.sh > tags.json 
 set -euo pipefail
-python3 - "$(npx wrangler kv key list --binding=TAGS)" << 'PY'
+python3 - "$(npx wrangler kv key list --remote --binding=TAGS)" << 'PY'
 import json, subprocess, sys
 raw = sys.argv[1]
 keys = [k["name"] for k in json.loads(raw[raw.index("["):])]
 out = {}
 for key in keys:
     val = subprocess.run(
-        ["wrangler", "kv", "key", "get", "--binding=TAGS", key],
+        ["npx", "wrangler", "kv", "key", "get", "--remote", "--binding=TAGS", key],
         capture_output=True, text=True, check=True,
     ).stdout
     out[key] = json.loads(val[val.index("{"):])  # tolerate wrangler banner lines
