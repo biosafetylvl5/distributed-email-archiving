@@ -42,6 +42,12 @@ variable "backup_mailbox" {
   description = "External mailbox receiving the PERMANENT backup forward. Cloudflare emails a verification link to it on first run."
 }
 
+variable "email_forwards" {
+  type        = map(string)
+  default     = {}
+  description = "Optional map of source address -> destination address to forward instead of ingesting, e.g. {\"me@example.org\" = \"me@personal.example\"}."
+}
+
 variable "ingest_worker_name" {
   type    = string
   default = "newsletter-ingest"

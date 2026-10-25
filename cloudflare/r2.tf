@@ -16,7 +16,7 @@ resource "cloudflare_r2_bucket" "public" {
   location   = "WEUR"
 }
 
-# you must manually cap the length that files sstay in the quarantine
+# you must manually cap the length that files stay in the quarantine
 # eg. set incoming/quarantine to be 30 days
 # if you wish!
 

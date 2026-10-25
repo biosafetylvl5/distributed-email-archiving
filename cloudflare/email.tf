@@ -23,6 +23,17 @@ resource "cloudflare_email_routing_catch_all" "all" {
   }
 }
 
+# Optional personal forwards (var.email_forwards)
+# a literal "to" rule is evaluated before the catch-all
+# so these addresses go to a person instead of the Worker
+# each destination must be verified (Cloudflare emails a link)
+resource "cloudflare_email_routing_address" "forward_dest" {
+  for_each = toset(values(var.email_forwards))
+
+  account_id = var.account_id
+  email      = each.value
+}
+
 resource "cloudflare_email_routing_rule" "forward" {
   for_each = var.email_forwards
 

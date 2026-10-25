@@ -1,6 +1,15 @@
+# local config with real KV ids, domain, backup mailbox
 wrangler.toml
-.wranger/*
-.wrangler/**
-**/.wrangler
-**/.terraform*
-.terraform*
+
+# wrangler / node
+.wrangler/
+node_modules/
+
+# terraform (commit .terraform.lock.hcl; never commit state)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+
+# export-tags.sh output (user names, sender domains)
+tags.json
