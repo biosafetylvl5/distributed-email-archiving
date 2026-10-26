@@ -17,6 +17,7 @@ import {
   type Settings,
 } from "../settings";
 import { authenticate, type AuthResult } from "./auth";
+import { archiveStats, CHART_DAYS } from "./stats";
 import { html, page, securityHeaders, type Html } from "./html";
 import {
   getQuarantined,
@@ -124,16 +125,32 @@ function configWarnings(env: Env): Html {
 
 // --- pages
 
+const QUIET_DAYS = 30;
+
+function bar(n: number, max: number, cls: string): Html {
+  const pct = max > 0 ? Math.floor((n / max) * 100) : 0; // floor: two bars never exceed 100%
+  return html`<span class="bar ${cls}" style="width:${pct}%"></span>`;
+}
+
+function ago(d: Date | null, now: Date): string {
+  if (!d) return "never";
+  const days = Math.floor((now.getTime() - d.getTime()) / 86_400_000);
+  return days <= 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
+}
+
 async function overview(ctx: Ctx): Promise<Response> {
   const { env } = ctx;
-  const [users, tags, { settings }, usage] = await Promise.all([
+  const now = new Date();
+  const [users, tags, { settings }, usage, stats] = await Promise.all([
     listUsers(env),
     listTags(env),
     settingsFor(env),
     usageForDay(env, today()),
+    archiveStats(env, now),
   ]);
   const active = users.filter((u) => u.record?.active).length;
   const byStatus = (s: string) => tags.filter((t) => t.record?.status === s).length;
+  const withField = (f: "publish" | "sender_domain" | "signup_url") => tags.filter((t) => t.record?.[f]).length;
   const capFor = (scope: string) =>
     scope === "global"
       ? settings.global_daily_cap
@@ -141,14 +158,86 @@ async function overview(ctx: Ctx): Promise<Response> {
         ? settings.tag_daily_cap
         : settings.untagged_daily_cap;
 
+  // every known subscription, plus user/tag pairs only seen in stored mail
+  // (bare addresses, or unknown tags under quarantine mode)
+  const known = new Map(tags.map((t) => [`${t.user}/${t.tag}`, t]));
+  const rows = [...new Set([...known.keys(), ...stats.tags.keys()])].map((id) => {
+    const s = stats.tags.get(id);
+    const t = known.get(id);
+    const [user, ...rest] = id.split("/");
+    return { id, user, tag: rest.join("/"), entry: t, s };
+  });
+  rows.sort((a, b) => (b.s?.last?.getTime() ?? 0) - (a.s?.last?.getTime() ?? 0) || a.id.localeCompare(b.id));
+  const quietCutoff = now.getTime() - QUIET_DAYS * 86_400_000;
+  const quiet = rows.filter(
+    (r) => r.entry?.record?.status === "approved" && (!r.s?.last || r.s.last.getTime() < quietCutoff),
+  );
+  const boundDomains = new Set(tags.map((t) => t.record?.sender_domain).filter(Boolean));
+  const dayMax = Math.max(1, ...stats.days.map((d) => d.archive + d.quarantine));
+  const t = stats.totals;
+  const partial = stats.partial
+    ? html`<p class="msg warn">The archive is large, so only part of it was scanned. Storage numbers are lower bounds.</p>`
+    : "";
+
   return show(
     ctx,
     "Overview",
     html`${configWarnings(env)}
 <table><tr><th>Users</th><td>${active} active, ${users.length - active} disabled</td></tr>
-<tr><th>Subscriptions</th><td>${byStatus("approved")} approved, ${byStatus("pending")} pending, ${byStatus("blocked")} blocked</td></tr>
+<tr><th>Subscriptions</th><td>${byStatus("approved")} approved, ${byStatus("pending")} pending, ${byStatus("blocked")} blocked
+<br><span class="muted">${withField("publish")} published · ${withField("sender_domain")} with a sender domain · ${withField("signup_url")} with a sign-up link</span></td></tr>
 <tr><th>Policy mode</th><td>${settings.policy_mode}</td></tr>
 <tr><th>Receiving domain</th><td><code>${env.ARCHIVE_DOMAIN || "(any)"}</code></td></tr></table>
+
+<h2>Stored mail</h2>
+${partial}
+<table><tr><th></th><th>Messages</th><th>Size</th><th>Last 7 days</th><th>Last 30 days</th></tr>
+<tr><th>Archived</th><td>${t.archive.count}</td><td>${formatBytes(t.archive.bytes)}</td><td>${stats.last7.archive}</td><td>${stats.last30.archive}</td></tr>
+<tr><th>Quarantined</th><td><a href="/quarantine">${t.quarantine.count}</a>${
+  stats.oldestQuarantine ? html` <span class="muted">(oldest ${stats.oldestQuarantine})</span>` : ""
+}</td><td>${formatBytes(t.quarantine.bytes)}</td><td>${stats.last7.quarantine}</td><td>${stats.last30.quarantine}</td></tr>
+<tr><th>Total</th><td>${t.archive.count + t.quarantine.count}</td><td>${formatBytes(t.archive.bytes + t.quarantine.bytes)}</td>
+<td>${stats.last7.archive + stats.last7.quarantine}</td><td>${stats.last30.archive + stats.last30.quarantine}</td></tr></table>
+
+<h2>Last ${CHART_DAYS} days <span class="muted">(UTC)</span></h2>
+<table class="chart"><tr><th>Day</th><th>Archived</th><th>Quarantined</th><th></th></tr>
+${[...stats.days].reverse().map(
+  (d) => html`<tr><td>${d.day}</td><td>${d.archive}</td><td>${d.quarantine}</td>
+<td class="bars">${bar(d.archive, dayMax, "a")}${bar(d.quarantine, dayMax, "q")}</td></tr>`,
+)}</table>
+
+<h2>Newsletters</h2>
+${
+  quiet.length
+    ? html`<p class="msg warn">${quiet.length} approved subscription${quiet.length === 1 ? " has" : "s have"} received nothing in ${QUIET_DAYS} days: ${quiet.map(
+        (r, i) => html`${i ? ", " : ""}<a href="${userPath(r.user)}">${r.entry?.record?.name || r.id}</a>`,
+      )}. The signup may have lapsed.</p>`
+    : ""
+}
+${
+  rows.length === 0
+    ? html`<p class="muted">No subscriptions or stored mail yet.</p>`
+    : html`<table><tr><th>Newsletter</th><th>User</th><th>Status</th><th>Archived</th><th>Quarantined</th><th>Size</th><th>Last received</th></tr>
+${rows.map((r) => {
+  const rec = r.entry?.record;
+  const label = rec?.name ? html`${rec.name} <code class="muted">${r.tag}</code>` : r.tag ? html`<code>${r.tag}</code>` : html`<span class="muted">(bare address)</span>`;
+  const status = r.entry ? (rec?.status ?? "unreadable") : r.tag ? "unknown tag" : "";
+  return html`<tr><td>${label}</td><td><a href="${userPath(r.user)}">${r.user}</a></td>
+<td class="status-${rec?.status ?? ""}">${status}</td><td>${r.s?.archive ?? 0}</td><td>${r.s?.quarantine ?? 0}</td>
+<td>${formatBytes(r.s?.bytes ?? 0)}</td><td title="${r.s?.last?.toISOString() ?? ""}">${ago(r.s?.last ?? null, now)}</td></tr>`;
+})}</table>`
+}
+
+<h2>Top sender domains <span class="muted">(last 30 days)</span></h2>
+${
+  stats.senders.length === 0
+    ? html`<p class="muted">No mail in the last 30 days.</p>`
+    : html`<table><tr><th>Envelope sender domain</th><th>Messages</th><th>Pinned by a subscription</th></tr>
+${stats.senders.slice(0, 10).map(
+  (s) => html`<tr><td><code>${s.domain}</code></td><td>${s.count}</td><td>${boundDomains.has(s.domain) ? "yes" : html`<span class="muted">no</span>`}</td></tr>`,
+)}</table>`
+}
+
 <h2>Today's usage <span class="muted">(${today()} UTC)</span></h2>
 ${
   usage.length === 0

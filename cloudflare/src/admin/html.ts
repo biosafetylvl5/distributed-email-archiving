@@ -73,6 +73,8 @@ input[type=text],input[type=number],input[type=url],textarea{padding:.2rem .3rem
 .tagform label{font-size:.9em;color:#555}
 .tagform input[type=text],.tagform input[type=url],.tagform textarea{display:block;width:100%;box-sizing:border-box;color:#222}
 .desc{white-space:pre-line}
+.chart td.bars{width:50%}.bar{display:inline-block;height:.8em;vertical-align:middle}
+.bar.a{background:#3d8f5a}.bar.q{background:#d9a520}
 form.inline{display:inline}
 .status-approved{color:#17703a}.status-blocked{color:#b02a2a}.status-pending{color:#8a6d00}
 `;

@@ -48,6 +48,7 @@ export class FakeKV {
 interface FakeObject {
   key: string;
   bytes: Uint8Array;
+  size: number;
   uploaded: Date;
   httpMetadata?: Record<string, string>;
   customMetadata?: Record<string, string>;
@@ -75,7 +76,7 @@ export class FakeR2 {
     uploaded = new Date(),
   ): Promise<void> {
     const bytes = typeof value === "string" ? new TextEncoder().encode(value) : new Uint8Array(value);
-    this.objects.set(key, { key, bytes, uploaded, ...opts });
+    this.objects.set(key, { key, bytes, size: bytes.byteLength, uploaded, ...opts });
   }
 
   async get(key: string, opts?: { range?: { offset: number; length: number } }) {
