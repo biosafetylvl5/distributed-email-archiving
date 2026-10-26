@@ -68,7 +68,11 @@ th{background:#f0f0f0}
 .ok{background:#e3f6e8;border:1px solid #9ad0a8}.err{background:#fde8e8;border:1px solid #e2a0a0}
 .warn{background:#fff6dd;border:1px solid #e5cf8a}
 .muted{color:#777}code{font-size:.9em}
-input[type=text],input[type=number]{padding:.2rem .3rem}
+input[type=text],input[type=number],input[type=url],textarea{padding:.2rem .3rem;font:inherit}
+.tagform{display:grid;gap:.3rem;margin-top:.3rem;min-width:22rem}
+.tagform label{font-size:.9em;color:#555}
+.tagform input[type=text],.tagform input[type=url],.tagform textarea{display:block;width:100%;box-sizing:border-box;color:#222}
+.desc{white-space:pre-line}
 form.inline{display:inline}
 .status-approved{color:#17703a}.status-blocked{color:#b02a2a}.status-pending{color:#8a6d00}
 `;

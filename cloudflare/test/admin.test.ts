@@ -138,8 +138,73 @@ describe("subscriptions", () => {
     await post(env, "/users/ann/tags", { tag: "_bad", status: "approved" });
     await post(env, "/users/ann/tags", { tag: "ok", status: "yolo" });
     await post(env, "/users/ann/tags", { tag: "ok", status: "approved", sender_domain: "not a domain" });
+    await post(env, "/users/ann/tags", { tag: "ok", status: "approved", signup_url: "javascript:alert(1)" });
+    await post(env, "/users/ann/tags", { tag: "ok", status: "approved", signup_url: "not a url" });
     await post(env, "/users/bob/tags", { tag: "ok", status: "approved" });
     expect(tags.data.size).toBe(0);
+  });
+
+  it("stores, shows and clears a sign-up link", async () => {
+    const { env, users, tags } = fakeEnv();
+    await users.put("ann", JSON.stringify({ active: true }));
+    const url = "https://ramen.example/subscribe?ref=a&b=\"x\"";
+    await post(env, "/users/ann/tags", { tag: "ramen", status: "approved", signup_url: url });
+    expect(tags.json("ann/ramen")).toEqual({ status: "approved", publish: false, signup_url: url });
+
+    const body = await (await get(env, "/subscriptions")).text();
+    expect(body).toContain('href="https://ramen.example/subscribe?ref=a&amp;b=&quot;x&quot;"');
+
+    await post(env, "/users/ann/tags", { tag: "ramen", status: "approved", signup_url: "" });
+    expect(tags.json("ann/ramen")).toEqual({ status: "approved", publish: false });
+  });
+
+  it("stores and shows name, description and note", async () => {
+    const { env, users, tags } = fakeEnv();
+    await users.put("ann", JSON.stringify({ active: true }));
+    await post(env, "/users/ann/tags", {
+      tag: "ramen",
+      status: "approved",
+      name: "  Ramen \n Weekly  ",
+      description: "Noodles.\r\n<b>Every</b> week.",
+      note: "signed up at the fair",
+    });
+    expect(tags.json("ann/ramen")).toEqual({
+      status: "approved",
+      publish: false,
+      name: "Ramen Weekly",
+      description: "Noodles.\n<b>Every</b> week.",
+      note: "signed up at the fair",
+    });
+    const body = await (await get(env, "/subscriptions")).text();
+    expect(body).toContain("<strong>Ramen Weekly</strong>");
+    expect(body).toContain('<div class="desc">Noodles.\n&lt;b&gt;Every&lt;/b&gt; week.</div>');
+    expect(body).toContain("Note: signed up at the fair");
+  });
+
+  it("caps text field lengths", async () => {
+    const { env, users, tags } = fakeEnv();
+    await users.put("ann", JSON.stringify({ active: true }));
+    await post(env, "/users/ann/tags", { tag: "t", status: "approved", name: "n".repeat(500), description: "d".repeat(5000) });
+    const rec = tags.json("ann/t") as { name: string; description: string };
+    expect(rec.name.length).toBe(200);
+    expect(rec.description.length).toBe(2000);
+  });
+
+  it("leaves fields the form does not include untouched", async () => {
+    const { env, users, tags } = fakeEnv();
+    await users.put("ann", JSON.stringify({ active: true }));
+    const full = { status: "approved", name: "R", description: "D", note: "N", signup_url: "https://r.example/" };
+    await tags.put("ann/ramen", JSON.stringify(full));
+    // the user page's short "new tag" form has no description, note or link
+    await post(env, "/users/ann/tags", { tag: "ramen", status: "approved", name: "Ramen", sender_domain: "" });
+    expect(tags.json("ann/ramen")).toEqual({ ...full, name: "Ramen", publish: false });
+  });
+
+  it("does not link sign-up URLs with unsafe schemes written directly to KV", async () => {
+    const { env, tags } = fakeEnv();
+    await tags.put("ann/x", JSON.stringify({ status: "approved", signup_url: "javascript:alert(1)" }));
+    const body = await (await get(env, "/subscriptions")).text();
+    expect(body).not.toContain('href="javascript:');
   });
 
   it("lists all subscriptions", async () => {

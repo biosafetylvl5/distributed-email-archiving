@@ -29,7 +29,11 @@ export interface TagRecord {
   sender_domain?: string;
   // Eligible for the delayed publication pipeline (processor `publish` pass).
   publish?: boolean;
-  note?: string;
+  // Admin metadata below; ingest ignores it.
+  name?: string; // display name, e.g. "Ramen Weekly"
+  description?: string;
+  signup_url?: string; // where the newsletter's sign-up form lives (http/https only)
+  note?: string; // private admin note
 }
 
 // Reasons carry no SMTP status codes — the platform (Cloudflare) or adapter

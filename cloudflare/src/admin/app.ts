@@ -45,6 +45,24 @@ interface Ctx {
 const TAG_STATUSES = ["approved", "pending", "blocked"] as const;
 const HOSTNAME_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 
+const NAME_MAX = 200;
+const DESCRIPTION_MAX = 2000;
+const NOTE_MAX = 500;
+const TEXT_FIELDS = ["name", "description", "sender_domain", "signup_url", "note"] as const;
+type TextField = (typeof TEXT_FIELDS)[number];
+
+// rendered as a link, so only http(s): never javascript:, data:, etc.
+// Also checked on display, since KV can be edited outside the dashboard
+function isSignupUrl(value: string): boolean {
+  if (value.length > 2048) return false;
+  try {
+    const u = new URL(value);
+    return (u.protocol === "https:" || u.protocol === "http:") && u.hostname !== "";
+  } catch {
+    return false;
+  }
+}
+
 function redirect(path: string, flash?: { msg?: string; err?: string }): Response {
   const q = new URLSearchParams();
   if (flash?.msg) q.set("msg", flash.msg);
@@ -179,17 +197,33 @@ ${fromSubscriptions ? html`<input type="hidden" name="back" value="subscriptions
     (s) => html`<option value="${s}" ${r?.status === s ? html`selected` : ""}>${s}</option>`,
   )}</select>
 <label><input type="checkbox" name="publish" value="1" ${r?.publish ? html`checked` : ""}> publish</label>
-<input type="text" name="sender_domain" value="${r?.sender_domain ?? ""}" placeholder="sender domain (optional)" size="22">
-<input type="text" name="note" value="${r?.note ?? ""}" placeholder="note" size="18">
+<details><summary>Edit details</summary><div class="tagform">
+<label>Name <input type="text" name="name" value="${r?.name ?? ""}" placeholder="Ramen Weekly" maxlength="${NAME_MAX}"></label>
+<label>Description <textarea name="description" rows="3" maxlength="${DESCRIPTION_MAX}">${r?.description ?? ""}</textarea></label>
+<label>Sender domain <input type="text" name="sender_domain" value="${r?.sender_domain ?? ""}" placeholder="optional; other senders are quarantined"></label>
+<label>Sign-up link <input type="url" name="signup_url" value="${r?.signup_url ?? ""}" placeholder="https://..."></label>
+<label>Private note <input type="text" name="note" value="${r?.note ?? ""}" maxlength="${NOTE_MAX}"></label>
+</div></details>
 <button>Save</button></form>`;
+}
+
+function tagSummary(t: TagEntry): Html {
+  const r = t.record;
+  return html`${r?.name ? html`<strong>${r.name}</strong><br>` : ""}<code>${t.tag}</code>${
+    r?.description ? html`<div class="desc">${r.description}</div>` : ""
+  }${
+    r?.signup_url && isSignupUrl(r.signup_url)
+      ? html`<div><a href="${r.signup_url}" rel="noopener noreferrer" target="_blank">sign-up page</a></div>`
+      : ""
+  }${r?.note ? html`<div class="muted">Note: ${r.note}</div>` : ""}`;
 }
 
 function tagTable(ctx: Ctx, tags: TagEntry[], withUser: boolean): Html {
   if (tags.length === 0) return html`<p class="muted">No subscriptions.</p>`;
-  return html`<table><tr>${withUser ? html`<th>User</th>` : ""}<th>Tag</th><th>Status</th><th>Address</th><th>Edit</th></tr>
+  return html`<table><tr>${withUser ? html`<th>User</th>` : ""}<th>Newsletter</th><th>Status</th><th>Address</th><th>Edit</th></tr>
 ${tags.map(
   (t) => html`<tr>${withUser ? html`<td><a href="${userPath(t.user)}">${t.user}</a></td>` : ""}
-<td>${t.tag}</td>
+<td>${tagSummary(t)}</td>
 <td class="status-${t.record?.status ?? ""}">${t.record?.status ?? "unreadable"}${t.record?.publish ? " · publish" : ""}${
     t.record?.sender_domain ? html`<br><span class="muted">from ${t.record.sender_domain}</span>` : ""
   }</td>
@@ -213,7 +247,9 @@ async function userPage(ctx: Ctx, user: string): Promise<Response> {
 <form method="post" action="${userPath(user)}/tags">
 <label>New tag <input type="text" name="tag" placeholder="ramen_weekly" required></label>
 <input type="hidden" name="status" value="approved">
+<input type="text" name="name" placeholder="name (optional)" maxlength="${NAME_MAX}">
 <input type="text" name="sender_domain" placeholder="sender domain (optional)">
+<input type="url" name="signup_url" placeholder="sign-up link (optional)">
 <button>Approve</button></form>
 ${tagTable(ctx, tags, false)}`,
   );
@@ -240,7 +276,17 @@ async function saveTag(ctx: Ctx, user: string): Promise<Response> {
   if (senderDomain && !HOSTNAME_RE.test(senderDomain)) {
     return redirect(back, { err: `Invalid sender domain: ${senderDomain}` });
   }
-  const note = field(form, "note").slice(0, 500);
+  const signupUrl = field(form, "signup_url");
+  if (signupUrl && !isSignupUrl(signupUrl)) {
+    return redirect(back, { err: `Invalid sign-up link (must be http or https): ${signupUrl}` });
+  }
+  const text: Record<TextField, string> = {
+    name: field(form, "name").replace(/\s+/g, " ").slice(0, NAME_MAX),
+    description: field(form, "description").replace(/\r\n?/g, "\n").slice(0, DESCRIPTION_MAX),
+    sender_domain: senderDomain,
+    signup_url: signupUrl,
+    note: field(form, "note").slice(0, NOTE_MAX),
+  };
 
   const current = (await getTag(ctx.env, user, tag)) ?? ({} as Partial<TagRecord>);
   const next: TagRecord = {
@@ -248,10 +294,13 @@ async function saveTag(ctx: Ctx, user: string): Promise<Response> {
     status: status as TagRecord["status"],
     publish: form.get("publish") === "1",
   };
-  if (senderDomain) next.sender_domain = senderDomain;
-  else delete next.sender_domain;
-  if (note) next.note = note;
-  else delete next.note;
+  // only touch fields the form actually has, so the short "new tag" form
+  // can't wipe a description or note; an empty value clears the field
+  for (const key of TEXT_FIELDS) {
+    if (!form.has(key)) continue;
+    if (text[key]) next[key] = text[key];
+    else delete next[key];
+  }
   await putTag(ctx.env, user, tag, next);
   return redirect(back, { msg: `Saved ${user}/${tag} (${status})` });
 }
