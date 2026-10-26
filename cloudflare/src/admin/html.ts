@@ -37,7 +37,9 @@ const SECURITY_HEADERS = {
     "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
-  "referrer-policy": "no-referrer",
+  // not "no-referrer": that makes browsers send `Origin: null` on our own form
+  // POSTs, which the same-origin check in app.ts would refuse
+  "referrer-policy": "same-origin",
   "cache-control": "no-store",
 };
 

@@ -53,7 +53,10 @@ export async function setUserActive(env: Env, name: string, active: boolean): Pr
 }
 
 export async function listTags(env: Env, user?: string): Promise<TagEntry[]> {
-  const keys = (await listAllKeys(env.TAGS, user ? `${user}/` : undefined)).sort();
+  // keys are "user/tag"; skip anything else rather than mis-splitting it
+  const keys = (await listAllKeys(env.TAGS, user ? `${user}/` : undefined))
+    .filter((key) => key.indexOf("/") > 0)
+    .sort();
   return Promise.all(
     keys.map(async (key) => {
       const slash = key.indexOf("/");

@@ -371,8 +371,13 @@ async function promoteMessage(ctx: Ctx): Promise<Response> {
 
 // --- routing
 
+// CSRF guard for POSTs. Sec-Fetch-Site is set by the browser and can't be
+// forged by a page; it covers browsers/extensions that send `Origin: null`
 function sameOrigin(request: Request, url: URL): boolean {
-  return request.headers.get("origin") === url.origin;
+  return (
+    request.headers.get("origin") === url.origin ||
+    request.headers.get("sec-fetch-site") === "same-origin"
+  );
 }
 
 async function route(ctx: Ctx): Promise<Response> {

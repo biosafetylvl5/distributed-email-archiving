@@ -9,8 +9,14 @@ const deny: Authenticator = async () => ({ ok: false, reason: "nope" });
 
 const get = (env: Env, path: string, auth = allow) => handleAdmin(new Request(ORIGIN + path), env, auth);
 
-function post(env: Env, path: string, fields: Record<string, string>, origin: string | null = ORIGIN) {
-  const headers: Record<string, string> = {};
+function post(
+  env: Env,
+  path: string,
+  fields: Record<string, string>,
+  origin: string | null = ORIGIN,
+  extra: Record<string, string> = {},
+) {
+  const headers: Record<string, string> = { ...extra };
   if (origin) headers.origin = origin;
   return handleAdmin(
     new Request(ORIGIN + path, { method: "POST", body: new URLSearchParams(fields), headers }),
@@ -34,7 +40,17 @@ describe("access control", () => {
     const { env, users } = fakeEnv();
     expect((await post(env, "/users", { name: "eve" }, "https://evil.example")).status).toBe(403);
     expect((await post(env, "/users", { name: "eve" }, null)).status).toBe(403);
+    expect((await post(env, "/users", { name: "eve" }, "null")).status).toBe(403);
+    const crossSite = { "sec-fetch-site": "cross-site" };
+    expect((await post(env, "/users", { name: "eve" }, "null", crossSite)).status).toBe(403);
     expect(users.data.size).toBe(0);
+  });
+
+  it("accepts same-origin POSTs that arrive with Origin: null", async () => {
+    const { env, users } = fakeEnv();
+    const res = await post(env, "/users", { name: "ann" }, "null", { "sec-fetch-site": "same-origin" });
+    expect(res.status).toBe(303);
+    expect(users.json("ann")).toEqual({ active: true });
   });
 
   it("sends security headers", async () => {
@@ -42,6 +58,8 @@ describe("access control", () => {
     const res = await get(env, "/users");
     expect(res.headers.get("content-security-policy")).toContain("default-src 'none'");
     expect(res.headers.get("x-frame-options")).toBe("DENY");
+    // "no-referrer" would make browsers send Origin: null on our own form POSTs
+    expect(res.headers.get("referrer-policy")).toBe("same-origin");
   });
 });
 
@@ -131,6 +149,15 @@ describe("subscriptions", () => {
     const body = await (await get(env, "/subscriptions")).text();
     expect(body).toContain("ann+a@mail.example.org");
     expect(body).toContain("bob+b@mail.example.org");
+  });
+
+  it("skips keys that are not user/tag", async () => {
+    const { env, tags } = fakeEnv();
+    await tags.put("ann", JSON.stringify({ active: true }));
+    await tags.put("ann/a", JSON.stringify({ status: "approved" }));
+    const body = await (await get(env, "/subscriptions")).text();
+    expect(body).toContain('action="/users/ann/tags"');
+    expect(body).not.toContain('action="/users/an/tags"');
   });
 });
 
