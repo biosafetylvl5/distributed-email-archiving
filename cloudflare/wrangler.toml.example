@@ -3,6 +3,10 @@ main = "src/index.ts"
 compatibility_date = "2025-09-01"
 workers_dev = false
 
+# admin dashboard (optional): serve it on a hostname protected by Cloudflare
+# Access. Must match var.admin_hostname in Terraform.
+# routes = [{ pattern = "admin.example.org", custom_domain = true }]
+
 # Private bucket holding raw + processed archive (created by Terraform).
 [[r2_buckets]]
 binding = "ARCHIVE"
@@ -22,7 +26,13 @@ id = "CHANGE_ME"
 binding = "RATELIMIT"
 id = "CHANGE_ME"
 
+# setting overrides edited from the admin dashboard (optional)
+[[kv_namespaces]]
+binding = "SETTINGS"
+id = "CHANGE_ME"
+
 [vars]
+# defaults for the settings below; the admin dashboard can override them
 # "strict": unknown tags are rejected at SMTP time
 # "quarantine": unknown tags are captured into incoming/quarantine/
 POLICY_MODE = "strict"
@@ -35,6 +45,14 @@ MAX_RAW_BYTES = "26214400"
 GLOBAL_DAILY_CAP = "500"
 TAG_DAILY_CAP = "50"
 UNTAGGED_DAILY_CAP = "10"
+
+# admin dashboard auth; the dashboard refuses every request until both are set
+# Zero Trust team domain, e.g. "myteam.cloudflareaccess.com"
+ACCESS_TEAM_DOMAIN = ""
+# `terraform output access_aud`
+ACCESS_AUD = ""
+# optional comma-separated allowlist, checked in addition to the Access policy
+ADMIN_EMAILS = ""
 
 [observability]
 enabled = true

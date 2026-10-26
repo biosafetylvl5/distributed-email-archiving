@@ -6,6 +6,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "deploy": "wrangler deploy",
+    "dev:admin": "wrangler dev --local --var ALLOW_LOCAL_NO_AUTH:true",
     "tail": "wrangler tail"
   },
   "devDependencies": {

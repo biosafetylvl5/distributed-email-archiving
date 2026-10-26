@@ -59,6 +59,7 @@ output "kv_namespace_ids" {
     USERS     = cloudflare_workers_kv_namespace.users.id
     TAGS      = cloudflare_workers_kv_namespace.tags.id
     RATELIMIT = cloudflare_workers_kv_namespace.ratelimit.id
+    SETTINGS  = cloudflare_workers_kv_namespace.settings.id
   }
 }
 

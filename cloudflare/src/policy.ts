@@ -41,8 +41,20 @@ export type Decision =
 
 // user: starts alnum, then alnum/dot/hyphen (no underscore, so "__" is an
 // unambiguous separator). tag: starts alnum, then alnum/dot/underscore/hyphen.
-const LOCAL_RE =
-  /^([a-z0-9][a-z0-9.-]{0,62})(?:(\+|__)([a-z0-9][a-z0-9._-]{0,62}))?$/;
+const USER_PART = "[a-z0-9][a-z0-9.-]{0,62}";
+const TAG_PART = "[a-z0-9][a-z0-9._-]{0,62}";
+const LOCAL_RE = new RegExp(`^(${USER_PART})(?:(\\+|__)(${TAG_PART}))?$`);
+const USER_RE = new RegExp(`^${USER_PART}$`);
+const TAG_RE = new RegExp(`^${TAG_PART}$`);
+
+// for admin input: names that parseRecipient could ever produce
+export function isValidUser(name: string): boolean {
+  return USER_RE.test(name);
+}
+
+export function isValidTag(name: string): boolean {
+  return TAG_RE.test(name);
+}
 
 export function parseRecipient(address: string): ParsedRecipient | null {
   const at = address.lastIndexOf("@");

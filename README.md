@@ -3,7 +3,7 @@
 Archives email newsletters as raw `.eml` plus a browsable HTML copy with remote dependencies.
 
 **Status:** this repo currently contains only the Cloudflare edge adapter
-(Email Routing + ingest Worker + R2/KV via Terraform) and its admin scripts.
+(Email Routing + ingest Worker + R2/KV via Terraform), its admin scripts, and an admin dashboard.
 Everything after `S3 incoming/` below is the goal architecture and not yet published.
 
 Goal architecture:
@@ -38,7 +38,7 @@ and labeled with users and tags:
 | any other domain in the zone                | rejected (unless listed in `email_forwards`)                      |
 
 If a tag has a `sender_domain`, mail from any other envelope sender domain is quarantined.
-`POLICY_MODE` is set in `wrangler.toml`.
+`POLICY_MODE` is set in `wrangler.toml` and can be overridden from the admin dashboard.
 
 Accepted mail is written to the `newsletter-archive` R2 bucket under
 `incoming/archive/` or `incoming/quarantine/`, and a copy is forwarded to the backup mailbox.
@@ -81,11 +81,46 @@ Accepted mail is written to the `newsletter-archive` R2 bucket under
        npm install && npm test && npm run deploy
        ```
 
-4. **Add a user** (run from `cloudflare/`, since wrangler reads `wrangler.toml` from the current directory):
+4. **Add a user** from the [admin dashboard](#admin-dashboard), or with the scripts
+   (run from `cloudflare/`, since wrangler reads `wrangler.toml` from the current directory):
    ```sh
    ./userctl.sh add john.smith
    ./tagctl.sh approve john.smith ramen_weekly mail.ramenweekly.example
    ```
+
+## Admin dashboard
+
+The ingest Worker also serves a small dashboard (`src/admin/`) for:
+
+- **Users:** list, add, disable or enable
+- **Subscriptions:** approve, mark pending, block or publish tags; set a sender domain and a note
+- **Settings:** override `POLICY_MODE`, the size limit and the daily caps without redeploying
+  (stored in the `SETTINGS` KV namespace; blank falls back to `wrangler.toml`)
+- **Quarantine:** the 50 most recent quarantined messages, with download and promote-to-archive
+- **Overview:** totals and today's usage against the daily caps
+
+It is protected by [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/applications/),
+and the Worker verifies the Access token itself. Until `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` are set,
+it refuses every request.
+
+Setup:
+
+1. In the Cloudflare dashboard, open **Zero Trust** once to create your team domain
+   (e.g. `myteam.cloudflareaccess.com`) and enable a login method (the one-time email PIN works).
+2. Create the Access application with Terraform (in addition to the variables above):
+   ```sh
+   terraform apply ... -var admin_hostname=admin.example.org \
+     -var 'admin_emails=["you@example.org"]'
+   terraform output access_aud
+   ```
+3. In `wrangler.toml`:
+   - add the `SETTINGS` namespace id from `terraform output kv_namespace_ids`
+   - uncomment `routes` and set it to the same hostname
+   - set `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, and optionally `ADMIN_EMAILS`
+4. `npm run deploy`, then open `https://admin.example.org`.
+
+For local development, `npm run dev:admin` serves the dashboard at `http://localhost:8787`
+against local simulated KV/R2, with auth skipped for localhost only.
 
 ## Admin scripts
 

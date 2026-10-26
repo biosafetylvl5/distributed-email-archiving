@@ -35,3 +35,9 @@ resource "cloudflare_workers_kv_namespace" "ratelimit" {
   account_id = var.account_id
   title      = "newsletter-ratelimit"
 }
+
+# runtime setting overrides written by the admin dashboard
+resource "cloudflare_workers_kv_namespace" "settings" {
+  account_id = var.account_id
+  title      = "newsletter-settings"
+}

@@ -9,35 +9,22 @@
 //   - setReject(...)  -> permanent SMTP rejection, sender gives up
 //   - throw           -> transient failure, well-behaved senders retry later
 //   - R2 put is authoritative; backup-forward failures are logged, never fatal
+//
+// fetch() serves the admin dashboard (src/admin/), never on the mail path
 
+import { handleAdmin } from "./admin/app";
+import type { Env } from "./env";
 import {
   decide,
   envelopeFromDomain,
   parseRecipient,
   recipientDomain,
-  type PolicyMode,
   type TagRecord,
   type UserRecord,
 } from "./policy";
+import { loadOverrides, resolveSettings } from "./settings";
 
-export interface Env {
-  ARCHIVE: R2Bucket;
-  USERS: KVNamespace;
-  TAGS: KVNamespace;
-  RATELIMIT: KVNamespace;
-  BACKUP_MAILBOX: string;
-  ARCHIVE_DOMAIN: string;
-  POLICY_MODE: string; // "strict" | "quarantine"
-  MAX_RAW_BYTES: string;
-  GLOBAL_DAILY_CAP: string;
-  TAG_DAILY_CAP: string;
-  UNTAGGED_DAILY_CAP: string;
-}
-
-function intVar(v: string | undefined, fallback: number): number {
-  const n = parseInt(v ?? "", 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
+export type { Env };
 
 async function sha256Hex(buf: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", buf);
@@ -77,9 +64,11 @@ const handler = {
       return;
     }
 
+    // KV override > wrangler.toml var > default
+    const { settings } = resolveSettings(env, await loadOverrides(env.SETTINGS));
+
     // Size gate before buffer the body
-    const maxBytes = intVar(env.MAX_RAW_BYTES, 25 * 1024 * 1024);
-    if (message.rawSize > maxBytes) {
+    if (message.rawSize > settings.max_raw_bytes) {
       message.setReject("message too large");
       return;
     }
@@ -93,7 +82,7 @@ const handler = {
       rec,
       userRecord,
       tagRecord,
-      mode: (env.POLICY_MODE as PolicyMode) || "strict",
+      mode: settings.policy_mode,
       envelopeFromDomain: envelopeFromDomain(message.from),
     });
 
@@ -108,15 +97,13 @@ const handler = {
     // Rate limits
     // DEFER (throw) rather than reject
     // senders retry once the daily window resets
-    if (!(await underDailyCap(env.RATELIMIT, "global", intVar(env.GLOBAL_DAILY_CAP, 500)))) {
+    if (!(await underDailyCap(env.RATELIMIT, "global", settings.global_daily_cap))) {
       throw new Error("over global daily cap; transient, senders retry");
     }
     const scope = decision.tag
       ? `tag:${decision.user}/${decision.tag}`
       : `untagged:${decision.user}`;
-    const cap = decision.tag
-      ? intVar(env.TAG_DAILY_CAP, 50)
-      : intVar(env.UNTAGGED_DAILY_CAP, 10);
+    const cap = decision.tag ? settings.tag_daily_cap : settings.untagged_daily_cap;
     if (!(await underDailyCap(env.RATELIMIT, scope, cap))) {
       throw new Error("over recipient daily cap; transient, senders retry");
     }
@@ -163,6 +150,10 @@ const handler = {
         bytes: message.rawSize,
       }),
     );
+  },
+
+  async fetch(request: Request, env: Env): Promise<Response> {
+    return handleAdmin(request, env);
   },
 } satisfies ExportedHandler<Env>;
 
