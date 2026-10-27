@@ -18,6 +18,7 @@ import {
 } from "../settings";
 import { authenticate, type AuthResult } from "./auth";
 import { archiveStats, CHART_DAYS } from "./stats";
+import { captureSummary, type ArchivedMessage, type CaptureState, type CaptureSummary } from "./captures";
 import { html, page, securityHeaders, type Html } from "./html";
 import {
   getQuarantined,
@@ -141,12 +142,13 @@ function ago(d: Date | null, now: Date): string {
 async function overview(ctx: Ctx): Promise<Response> {
   const { env } = ctx;
   const now = new Date();
-  const [users, tags, { settings }, usage, stats] = await Promise.all([
+  const [users, tags, { settings }, usage, stats, captures] = await Promise.all([
     listUsers(env),
     listTags(env),
     settingsFor(env),
     usageForDay(env, today()),
     archiveStats(env, now),
+    captureSummary(env),
   ]);
   const active = users.filter((u) => u.record?.active).length;
   const byStatus = (s: string) => tags.filter((t) => t.record?.status === s).length;
@@ -199,6 +201,8 @@ ${partial}
 <tr><th>Total</th><td>${t.archive.count + t.quarantine.count}</td><td>${formatBytes(t.archive.bytes + t.quarantine.bytes)}</td>
 <td>${stats.last7.archive + stats.last7.quarantine}</td><td>${stats.last30.archive + stats.last30.quarantine}</td></tr></table>
 
+${captureSection(captures, now)}
+
 <h2>Last ${CHART_DAYS} days <span class="muted">(UTC)</span></h2>
 <table class="chart"><tr><th>Day</th><th>Archived</th><th>Quarantined</th><th></th></tr>
 ${[...stats.days].reverse().map(
@@ -217,13 +221,14 @@ ${
 ${
   rows.length === 0
     ? html`<p class="muted">No subscriptions or stored mail yet.</p>`
-    : html`<table><tr><th>Newsletter</th><th>User</th><th>Status</th><th>Archived</th><th>Quarantined</th><th>Size</th><th>Last received</th></tr>
+    : html`<table><tr><th>Newsletter</th><th>User</th><th>Status</th><th>Archived</th><th>Captured</th><th>Quarantined</th><th>Size</th><th>Last received</th></tr>
 ${rows.map((r) => {
   const rec = r.entry?.record;
   const label = rec?.name ? html`${rec.name} <code class="muted">${r.tag}</code>` : r.tag ? html`<code>${r.tag}</code>` : html`<span class="muted">(bare address)</span>`;
   const status = r.entry ? (rec?.status ?? "unreadable") : r.tag ? "unknown tag" : "";
   return html`<tr><td>${label}</td><td><a href="${userPath(r.user)}">${r.user}</a></td>
-<td class="status-${rec?.status ?? ""}">${status}</td><td>${r.s?.archive ?? 0}</td><td>${r.s?.quarantine ?? 0}</td>
+<td class="status-${rec?.status ?? ""}">${status}</td><td>${r.s?.archive ?? 0}</td>
+<td>${capturedCell(captures.bySubscription.get(r.id))}</td><td>${r.s?.quarantine ?? 0}</td>
 <td>${formatBytes(r.s?.bytes ?? 0)}</td><td title="${r.s?.last?.toISOString() ?? ""}">${ago(r.s?.last ?? null, now)}</td></tr>`;
 })}</table>`
 }
@@ -245,6 +250,92 @@ ${
     : html`<table><tr><th>Scope</th><th>Count</th><th>Daily cap</th></tr>
 ${usage.map((u) => html`<tr><td><code>${u.scope}</code></td><td>${u.count}</td><td>${capFor(u.scope)}</td></tr>`)}</table>
 <p class="muted">Counters are approximate (KV is eventually consistent). Deferred retries count too.</p>`
+}`,
+  );
+}
+
+// --- captures (dea-capture's issue-status records)
+
+function agoTime(d: Date | null, now: Date): string {
+  if (!d) return "never";
+  const mins = Math.floor((now.getTime() - d.getTime()) / 60_000);
+  if (mins < 60) return mins <= 0 ? "just now" : `${mins} min ago`;
+  if (mins < 48 * 60) return `${Math.floor(mins / 60)} h ago`;
+  return ago(d, now);
+}
+
+function capturedCell(s: Record<CaptureState, number> | undefined): Html {
+  if (!s) return html`<span class="muted">0</span>`;
+  const extra = [
+    s.partial ? html`<a class="status-pending" href="/captures?state=partial">${s.partial} partial</a>` : null,
+    s.pending ? html`<span class="muted">${s.pending} pending</span>` : null,
+  ].filter((x) => x !== null);
+  return html`${s.done + s.partial}${extra.length ? html` <span class="muted">(</span>${extra.map((x, i) => html`${i ? ", " : ""}${x}`)}<span class="muted">)</span>` : ""}`;
+}
+
+function captureSection(c: CaptureSummary, now: Date): Html {
+  const archived = c.states.done + c.states.partial + c.states.pending;
+  const t = c.totals;
+  return html`<h2>Capture <span class="muted">(<a href="/captures">by message</a>)</span></h2>
+${c.partial ? html`<p class="msg warn">Only part of the archive was scanned; these numbers are lower bounds.</p>` : ""}
+<table><tr><th>Messages</th><td>${c.states.done + c.states.partial} of ${archived} processed:
+${c.states.done} complete, <a href="/captures?state=partial">${c.states.partial} partial</a>,
+<a href="/captures?state=pending">${c.states.pending} pending</a></td></tr>
+<tr><th>Embedded files</th><td>${t.assets_ok} stored, ${t.assets_failed} failed, ${t.assets_deferred} deferred, ${t.assets_refused} refused
+<br><span class="muted">${t.pixels} of them tracking pixels</span></td></tr>
+<tr><th>Links</th><td>${t.links} found: ${t.links_capture} to capture, ${t.links_resolve} redirects to resolve, ${t.links_skip} never fetched
+<br><span class="muted">Link capture isn't running yet.</span></td></tr>
+<tr><th>Last processed</th><td title="${c.lastCompleted?.toISOString() ?? ""}">${agoTime(c.lastCompleted, now)}
+<span class="muted">· new mail is picked up within about 5 minutes</span></td></tr></table>`;
+}
+
+const CAPTURE_STATES = ["all", "partial", "pending", "done"] as const;
+const CAPTURE_PAGE_MAX = 200;
+
+function captureRow(m: ArchivedMessage): Html {
+  const c = m.capture;
+  const sub = m.user ? html`<a href="${userPath(m.user)}">${m.user}</a> <code>${m.tag || "(bare)"}</code>` : html`<span class="muted">unknown</span>`;
+  const sha = m.key.split("/").pop()?.replace(/\.eml$/, "") ?? "";
+  if (!c) {
+    return html`<tr><td>${m.day}</td><td>${sub}</td><td><code class="muted" title="${sha}">${sha.slice(0, 12)}</code></td>
+<td class="muted">pending</td><td></td><td></td><td></td></tr>`;
+  }
+  const n = c.counts;
+  const problems = [
+    n.assets_failed ? `${n.assets_failed} failed` : "",
+    n.assets_deferred ? `${n.assets_deferred} deferred` : "",
+    n.assets_refused ? `${n.assets_refused} refused` : "",
+  ].filter(Boolean);
+  return html`<tr><td>${m.day}</td><td>${sub}</td><td><code title="${sha}">${sha.slice(0, 12)}</code></td>
+<td class="${c.state === "done" ? "status-approved" : "status-pending"}">${c.state === "done" ? "complete" : "partial"}</td>
+<td>${n.assets_ok}${problems.length ? html` <span class="status-pending">(${problems.join(", ")})</span>` : ""}</td>
+<td>${n.links_capture + n.links_resolve} <span class="muted">/ ${n.links}</span></td>
+<td title="${c.completedAt?.toISOString() ?? ""}">${c.completedAt?.toISOString().slice(0, 16).replace("T", " ") ?? ""}</td></tr>`;
+}
+
+async function capturesPage(ctx: Ctx): Promise<Response> {
+  const c = await captureSummary(ctx.env);
+  const asked = ctx.url.searchParams.get("state") ?? "all";
+  const state = (CAPTURE_STATES as readonly string[]).includes(asked) ? asked : "all";
+  const shown = c.messages.filter((m) => state === "all" || (m.capture?.state ?? "pending") === state);
+  const total = (st: string) => (st === "all" ? c.messages.length : c.states[st as CaptureState]);
+  return show(
+    ctx,
+    "Captures",
+    html`<p class="muted">What dea-capture stored for each archived message, newest first: embedded files and
+the link inventory. Counts only; the files themselves are in R2 under <code>issues/&lt;sha&gt;/</code>.</p>
+${c.partial ? html`<p class="msg warn">Only part of the archive was scanned.</p>` : ""}
+<p>${CAPTURE_STATES.map(
+      (st, i) =>
+        html`${i ? " · " : ""}${st === state ? html`<strong>${st} (${total(st)})</strong>` : html`<a href="/captures?state=${st}">${st} (${total(st)})</a>`}`,
+    )}</p>
+${
+  shown.length === 0
+    ? html`<p class="muted">No messages.</p>`
+    : html`<table><tr><th>Received</th><th>Subscription</th><th>Message</th><th>Status</th><th>Embedded files</th>
+<th title="links to capture or resolve, of all links">Links</th><th>Processed (UTC)</th></tr>
+${shown.slice(0, CAPTURE_PAGE_MAX).map(captureRow)}</table>
+${shown.length > CAPTURE_PAGE_MAX ? html`<p class="muted">Showing the newest ${CAPTURE_PAGE_MAX} of ${shown.length}.</p>` : ""}`
 }`,
   );
 }
@@ -530,6 +621,7 @@ async function route(ctx: Ctx): Promise<Response> {
     if (path === "/subscriptions") return subscriptionsPage(ctx);
     if (path === "/settings") return settingsPage(ctx);
     if (path === "/quarantine") return quarantinePage(ctx);
+    if (path === "/captures") return capturesPage(ctx);
     if (path === "/quarantine/raw") return quarantineRaw(ctx);
     if (userMatch && !userMatch[2]) {
       const user = userMatch[1];

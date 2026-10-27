@@ -53,6 +53,7 @@ const NAV = [
   ["/subscriptions", "Subscriptions"],
   ["/settings", "Settings"],
   ["/quarantine", "Quarantine"],
+  ["/captures", "Captures"],
 ];
 
 const CSS = `
