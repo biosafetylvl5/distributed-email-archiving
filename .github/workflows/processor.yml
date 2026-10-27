@@ -1,6 +1,7 @@
 # Tests dea-capture, and on main publishes its image to
 # ghcr.io/<owner>/dea-capture (linux/amd64), tagged with the commit SHA and
-# `main`. Deploy by digest, not tag.
+# `main`. Deploy by digest, not tag. The image is pushed only after a smoke
+# test inside it: the browser can't reach loopback, and a real page captures.
 name: processor
 
 on:
@@ -53,6 +54,19 @@ jobs:
           tags: |
             type=sha,format=long,prefix=
             type=raw,value=main,enable={{is_default_branch}}
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: processor
+          platforms: linux/amd64
+          load: true
+          tags: dea-capture:smoke
+          cache-from: type=gha
+      # as the pod runs it: read-only root, uid 1000, only /tmp writable
+      - working-directory: .
+        run: >-
+          docker run --rm --read-only --tmpfs /tmp:exec --user 1000:1000
+          -v "$PWD/processor/deploy/smoke-page.py:/smoke.py:ro"
+          dea-capture:smoke python3 /smoke.py
       - id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:

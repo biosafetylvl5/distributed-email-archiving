@@ -7,10 +7,13 @@
 #   watch-direct    emits captures/due/direct/ keys once their time has come
 #   direct-builder  makes one job per due key
 #   capture-direct  runs `dea-capture capture s3://<bucket>/<due key>`
+#   watch-page, page-builder, capture-page
+#                   the same for captures/due/page/: the page loads in
+#                   browsertrix-crawler behind dea-capture's guarding proxy
 #
 # Each builder takes only its own monitor's keys, by the monitor's hostname.
-# Page and media captures queue under captures/due/page/ and media/ and wait
-# there until their stages exist.
+# Media captures queue under captures/due/media/ and wait there until their
+# stage exists.
 #
 # Credentials and the R2 endpoint come from the environment (AWS_ACCESS_KEY_ID,
 # AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL), never from this file. On restart the
@@ -99,5 +102,43 @@ spec:
         config:
           # one 100 MiB body in memory at a time
           max_workers: 1
+          timeout_seconds: 900
+          log_to_logger: true
+    - watch-page:
+        kind: data_monitor
+        name: s3_due_poller
+        config:
+          bucket: newsletter-archive
+          prefix: captures/due/page/
+          suffix_filter: [".json"]
+          region: auto
+          poll_interval_seconds: 60
+          run_on_start: true
+          hostname: due-page
+    - page-builder:
+        kind: job_builder
+        name: filter_and_group
+        config:
+          files_per_job: 1
+          filters: {hostname: due-page}
+          targets:
+            - capture-page
+          payload:
+            page-payload:
+              kind: payload
+              name: shell_payload
+              config:
+                binary: dea-capture
+                prefix_args:
+                  - capture
+                  - "{{ files[0].file }}"
+    - capture-page:
+        kind: dispatcher
+        name: local_dispatcher
+        config:
+          # one browser at a time: the crawler's redis has a fixed port, and
+          # a browser wants about 1-2 GiB
+          max_workers: 1
+          # the crawl is killed after 7 minutes; this leaves time to upload
           timeout_seconds: 900
           log_to_logger: true

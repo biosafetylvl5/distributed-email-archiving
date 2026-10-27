@@ -9,13 +9,15 @@ reader of a message would encounter and fetches it once. It never follows a
 link that would change the subscription or act publicly in the subscriber's
 name.
 
-**Status: phase 3, first half.** Extraction, classification and the safety
-guards exist and are tested. The `issue` stage stores every embed of each
-archived message, then resolves its links and queues each landing page once.
-`capture` stores direct downloads (PDFs, images, files), retries failures on
-a schedule and falls back to the Wayback Machine. It all runs as a
-[courier](https://github.com/CIRA-GEOIPS/courier) service. Page capture
-(Browsertrix) and media capture (yt-dlp) come next.
+**Status: phase 3.** Extraction, classification and the safety guards exist
+and are tested. The `issue` stage stores every embed of each archived
+message, then resolves its links and queues each landing page once.
+`capture` stores direct downloads (PDFs, images, files) and pages, which it
+loads in [browsertrix-crawler](https://github.com/webrecorder/browsertrix-crawler)
+behind a guarding proxy. It retries failures on a schedule and falls back to
+the Wayback Machine. It all runs as a
+[courier](https://github.com/CIRA-GEOIPS/courier) service. Media capture
+(yt-dlp) comes next.
 
 ## What it does with each link
 
@@ -58,6 +60,16 @@ again; TLS still checks the certificate against the original host. It never
 follows redirects itself. `fetch.follow` sends every hop back through the
 guard, so a click tracker that lands on an unsubscribe page is refused before
 that request is made.
+
+A page's browser makes its own requests, so it gets the same address check
+from `proxy.GuardProxy`, a forward proxy on `127.0.0.1` that the crawler is
+pointed at. The browser is started with `--proxy-bypass-list=<-loopback>`,
+so `localhost` goes through the proxy too and is refused (the crawler's
+redis and the browser's debugging port listen there). The proxy tunnels TLS
+on port 443 and forwards plain HTTP on port 80, and refuses everything else.
+browsertrix-crawler turns off the browser's certificate checks whenever a
+proxy is set, so the proxy checks instead: before the first tunnel to a host
+and address, it completes its own verified TLS handshake with them.
 
 ## The `issue` stage
 
@@ -129,6 +141,15 @@ later. After the last one, the Wayback Machine snapshot closest to when the
 URL was first queued is stored instead, its original bytes (`id_`), not
 the Wayback page around them.
 
+Page keys load the canonical URL alone in browsertrix-crawler (no other pages,
+no links followed), with its scroll and autoplay behaviours, a 60 s load
+timeout, 4 minutes in all and 200 MiB at most. The attempt's folder gets
+`page.wacz`, the viewport `screenshot.png`, the extracted `text.txt` and
+`capture.json` (status, title, the crawler's version and the proxy's counts).
+Failures retry on the same schedule. The crawler's log, which names every URL
+the page loaded, stays in a temporary directory. `dea-capture page URL --out
+DIR` captures one page locally, in the container image.
+
 Only canonical URLs, with tracking and auth parameters and email addresses
 removed, are stored under `captures/`.
 
@@ -136,16 +157,21 @@ removed, are stored under `captures/`.
 
 `deploy/service.yaml` is the courier service. An S3 poller on
 `incoming/archive/` makes one job per `.eml` for `dea-capture issue`. An
-`s3_due_poller` on `captures/due/direct/` makes one job per due key for
-`dea-capture capture`. That poller is courier's S3 poller, except that it
-emits a key only once the time in its name has passed. It comes with this
+`s3_due_poller` each on `captures/due/direct/` and `captures/due/page/` makes
+one job per due key for `dea-capture capture`. That poller is courier's S3
+poller, except that it emits a key only once the time in its name has passed. It comes with this
 package as a courier plugin. The service needs `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY` and `AWS_ENDPOINT_URL` (the R2 S3 endpoint) in the environment. The object
-key is passed as its own argument, never through a shell.
+key is passed as its own argument, never through a shell. The crawler gets
+the environment without the `AWS_*` credentials.
 
-The `Dockerfile` builds it with courier pinned to a commit (the `service`
-extra). GitHub Actions publishes `ghcr.io/<owner>/dea-capture` for
-linux/amd64 on every push to `main` that touches `processor/`.
+The `Dockerfile` builds it on the browsertrix-crawler image, with courier
+pinned to a commit (the `service` extra). GitHub Actions publishes
+`ghcr.io/<owner>/dea-capture` for linux/amd64 on every push to `main` that
+touches `processor/`, after `deploy/smoke-page.py` passes inside the image:
+the browser can't reach a server on loopback, and a real page captures. One
+page capture at a time wants about 2 CPUs and 2 GiB of memory, and up to
+1 GiB in `/tmp`.
 
 Courier never restarts a crashed plugin, and the process keeps looking
 healthy. Use `dea-capture healthcheck` as the liveness probe. It fails

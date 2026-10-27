@@ -23,7 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -32,6 +32,7 @@ from urllib.parse import urlencode, urlsplit
 from . import __version__
 from .fetch import FetchError, HostPacer, TooLarge, follow
 from .guard import ForbiddenFetch, GuardedFetcher
+from .page import PageOutcome, store_page
 from .store import Store, ext_for, put_json
 
 Kind = Literal["page", "direct", "media"]
@@ -209,8 +210,10 @@ def run(
     now: datetime,
     pacer: HostPacer | None = None,
     wayback_fetcher: GuardedFetcher | None = None,
+    page_crawler: Callable[[str], PageOutcome] | None = None,
 ) -> CaptureResult:
-    """Run the capture a due key asks for."""
+    """Run the capture a due key asks for. Page keys need ``page_crawler``,
+    which takes the canonical URL (see ``page.crawl_page``)."""
     kind, _, h = parse_due_key(key)
     pacer = pacer or HostPacer()
     data = store.get(index_key(h))
@@ -227,8 +230,8 @@ def run(
         save(store, rec)
         store.delete(key)
         return CaptureResult(h, kind, "rerouted", rec.status, len(rec.attempts))
-    if kind != "direct":
-        raise NotImplementedError(f"no {kind} capture stage yet")
+    if kind == "media" or (kind == "page" and page_crawler is None):
+        raise NotImplementedError(f"no {kind} capture stage here")
 
     # take a lease: if this process dies, the lease falls due and it runs again
     lease = _due(store, kind, now + LEASE[kind], h)
@@ -236,7 +239,11 @@ def run(
     save(store, rec)
     store.delete(key)
 
-    attempt = capture_direct(store, rec, fetcher, pacer, now)
+    if kind == "page":
+        assert page_crawler is not None
+        attempt = capture_page(store, rec, page_crawler, now)
+    else:
+        attempt = capture_direct(store, rec, fetcher, pacer, now)
     rec.attempts.append(attempt)
     rec.updated_at = attempt.at
     if attempt.outcome == "ok":
@@ -314,6 +321,20 @@ def capture_direct(
     folder = _store_capture(store, rec, now, got.chain, resp.status, resp.headers, resp.body,
                             "direct")  # fmt: skip
     return Attempt(at, "ok", resp.status, capture=folder)
+
+
+def capture_page(
+    store: Store, rec: CaptureRecord, crawler: Callable[[str], PageOutcome], now: datetime
+) -> Attempt:
+    at = _iso(now)
+    got = crawler(rec.canonical)
+    if got.outcome == "refused":
+        return Attempt(at, "refused", got.http_status, got.error)
+    if got.outcome != "ok":
+        return Attempt(at, "failed", got.http_status, got.error)
+    folder = capture_dir(rec.h, now)
+    store_page(store, folder, rec.canonical, got, at)
+    return Attempt(at, "ok", got.http_status, capture=folder)
 
 
 def wayback_raw(snapshot_url: str, timestamp: str) -> str:

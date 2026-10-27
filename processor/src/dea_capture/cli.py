@@ -2,8 +2,9 @@
 
 ``inventory`` is the offline dry run. ``issue`` is the first capture stage:
 it stores one message's embeds and link inventory, then resolves its links and
-queues them. ``capture`` runs one queued capture. ``healthcheck`` is the pod's
-liveness probe.
+queues them. ``capture`` runs one queued capture. ``page`` captures one page
+into a local directory, for trying the crawler out. ``healthcheck`` is the
+pod's liveness probe.
 """
 
 from __future__ import annotations
@@ -14,15 +15,16 @@ import json
 import os
 import sys
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import __version__, capture, health
+from . import __version__, capture, health, page
 from .fetch import HttpFetcher
 from .guard import GuardedFetcher, IPNetwork
 from .inventory import Inventory, inventory
 from .issue import process_issue
+from .proxy import GuardProxy
 from .store import LocalStore, S3Store, Store, split_s3_uri
 
 
@@ -110,9 +112,33 @@ def _cmd_capture(args: argparse.Namespace) -> int:
     result = capture.run(
         store, key, fetcher, now=datetime.now(UTC),
         wayback_fetcher=None if args.no_wayback else fetcher,
+        page_crawler=_page_crawler(blocked),
     )  # fmt: skip
     print(result.line())
     return 0
+
+
+def _page_crawler(blocked: list[IPNetwork]) -> Callable[[str], page.PageOutcome]:
+    def crawler(url: str, workdir: Path) -> page.Crawl:
+        return page.run_crawler(url, workdir, GuardProxy(extra_blocked=blocked), _user_agent())
+
+    return lambda url: page.crawl_page(url, crawler, blocked)
+
+
+def _cmd_page(args: argparse.Namespace) -> int:
+    got = _page_crawler(_extra_blocked())(args.url)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    if got.outcome == "ok":
+        page.store_page(LocalStore(out), "", args.url, got,
+                        datetime.now(UTC).isoformat(timespec="seconds"))  # fmt: skip
+    summary = {
+        "outcome": got.outcome, "http_status": got.http_status, "error": got.error,
+        "files": {name: len(data) for name, data in got.files.items()},
+        "proxy": got.info.get("proxy"), "limit_hit": got.info.get("limit_hit"),
+    }  # fmt: skip
+    print(json.dumps(summary))
+    return 0 if got.outcome == "ok" else 1
 
 
 def _cmd_healthcheck(args: argparse.Namespace) -> int:
@@ -177,6 +203,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("due", metavar="DUE", help="s3://bucket/captures/due/<kind>/<key>.json")
     p.add_argument("--no-wayback", action="store_true", help="no Wayback Machine fallback")
     p.set_defaults(func=_cmd_capture)
+
+    p = sub.add_parser(
+        "page",
+        help="capture one page with the crawler, into a local directory",
+        description=(
+            "Load URL in browsertrix-crawler behind the guarding proxy and write page.wacz, "
+            "screenshot.png, text.txt and capture.json to --out DIR. Needs the crawler, so "
+            "run it in the container image. Prints a summary with no URLs."
+        ),
+    )
+    p.add_argument("url", metavar="URL")
+    p.add_argument("--out", metavar="DIR", required=True)
+    p.set_defaults(func=_cmd_page)
 
     p = sub.add_parser("healthcheck", help="liveness probe for the courier service")
     p.add_argument("--metrics", default="http://127.0.0.1:8000/metrics")
