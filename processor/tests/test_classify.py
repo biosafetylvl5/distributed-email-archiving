@@ -67,6 +67,8 @@ def test_canonicalize(url: str, expected: str) -> None:
 def test_decode_substack_v2() -> None:
     url = f"https://substack.com/redirect/2/{_jwt({'e': POST, 'p': 1})}?j=x"
     assert decode_redirect(url) == POST
+    two_part = _jwt({"e": POST}).split(".", 1)[1]  # payload.signature, as sent
+    assert decode_redirect(f"https://substack.com/redirect/2/{two_part}") == POST
 
 
 @pytest.mark.parametrize(
@@ -91,6 +93,10 @@ def test_decode_only_on_substack() -> None:
     [
         ("https://substack.com/redirect/abc?j=1", "substack"),
         ("https://x.us1.list-manage.com/track/click?u=1", "mailchimp"),
+        ("https://us1.list-manage.com/CvccQjEdTpH?e=1&c2id=2&m=3", "mailchimp"),
+        ("https://us1.list-manage.com/d4AELPnCtuj", "mailchimp"),
+        ("https://x.us1.list-manage.com/vcard?u=1", None),
+        ("https://x.us1.list-manage.com/subscribe?u=1", None),
         ("https://email.mg1.substack.com/c/eJx", "mailgun"),
         ("https://x.activehosted.com/lt.php?x=1", "activecampaign"),
         ("https://x.lt.acemlna.com/Prod/link-tracker?a=1", "activecampaign"),

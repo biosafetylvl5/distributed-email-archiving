@@ -44,6 +44,16 @@
       "fetch_url": "https://substack.com/redirect/6f1c2d3e-0000-4000-8000-000000000001?j=eyJ1IjozMDAzfQ"
     },
     {
+      "href": "https://substack.com/redirect/2/eyJlIjoiaHR0cHM6Ly93d3cuZXhhbXBsZS5vcmcvbmV3cy9vY3RvYmVyLWZlYXR1cmUiLCJwIjoxMDAxLCJzIjoyMDAyLCJmIjp0cnVlLCJ1IjozMDAzLCJpYXQiOjE3NjE1MDAwMDAsImV4cCI6MTc2NDA5MjAwMCwiaXNzIjoicHViLTIwMDIiLCJzdWIiOiJsaW5rLXJlZGlyZWN0In0.c2lnbmF0dXJlLXR3by1wYXJ0LWZvcm0?utm_source=substack&utm_medium=email&utm_content=share",
+      "text": "a feature elsewhere",
+      "link_class": "tracking-redirect",
+      "decision": "resolve",
+      "reason": "substack redirect, target decoded",
+      "decoded": "https://www.example.org/news/october-feature",
+      "canonical": "https://www.example.org/news/october-feature",
+      "fetch_url": "https://substack.com/redirect/2/eyJlIjoiaHR0cHM6Ly93d3cuZXhhbXBsZS5vcmcvbmV3cy9vY3RvYmVyLWZlYXR1cmUiLCJwIjoxMDAxLCJzIjoyMDAyLCJmIjp0cnVlLCJ1IjozMDAzLCJpYXQiOjE3NjE1MDAwMDAsImV4cCI6MTc2NDA5MjAwMCwiaXNzIjoicHViLTIwMDIiLCJzdWIiOiJsaW5rLXJlZGlyZWN0In0.c2lnbmF0dXJlLXR3by1wYXJ0LWZvcm0?utm_source=substack&utm_medium=email&utm_content=share"
+    },
+    {
       "href": "https://email.mg1.substack.com/c/eJxOpaqueClickWrapper",
       "text": "a wrapped link",
       "link_class": "tracking-redirect",

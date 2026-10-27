@@ -156,6 +156,12 @@ class _Redirect:
 _REDIRECTS = (
     _Redirect("substack", re.compile(r"^(.+\.)?substack\.com$"), re.compile(r"^/redirect/")),
     _Redirect("mailchimp", re.compile(r"(^|\.)list-manage\.com$"), re.compile(r"^/track/click")),
+    # newer short links, us<n>.list-manage.com/<code>?c2id=…; the code always has
+    # a capital or digit, which keeps /vcard, /subscribe and friends out
+    _Redirect(
+        "mailchimp", re.compile(r"(^|\.)list-manage\.com$"),
+        re.compile(r"^/(?=[^/]*[A-Z0-9])[A-Za-z0-9]{6,}/?$"),
+    ),
     _Redirect("mailgun", re.compile(r"^email\.[a-z0-9.-]+$"), re.compile(r"^/c/")),
     _Redirect("activecampaign", re.compile(r".*"), re.compile(r"/lt\.php$|^/Prod/link-tracker")),
     _Redirect("sendgrid", re.compile(r"(^|\.)ct\.sendgrid\.net$"), re.compile(r"^/ls/click")),
@@ -165,7 +171,8 @@ _REDIRECTS = (
     ),
 )  # fmt: skip
 
-_SUBSTACK_V2 = re.compile(r"^/redirect/2/([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*)")
+# payload.signature in practice; header.payload.signature also accepted
+_SUBSTACK_V2 = re.compile(r"^/redirect/2/([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]*){1,2})(?:/|$)")
 
 
 def _b64url_json(segment: str) -> object:
@@ -185,8 +192,8 @@ def tracking_vendor(url: str) -> str | None:
 def decode_redirect(url: str) -> str | None:
     """The target of a redirect that carries it in the URL, or None.
 
-    Substack's ``/redirect/2/<jwt>`` keeps the target in the payload's ``e``
-    claim. The signature isn't checked: the result is only used to classify
+    Substack's ``/redirect/2/<token>`` keeps the target in the token
+    payload's ``e`` claim. The signature isn't checked: the result is only used to classify
     and deduplicate, never as proof of where the redirect goes.
     """
     parts = urlsplit(url)
@@ -194,8 +201,9 @@ def decode_redirect(url: str) -> str | None:
     if host == "substack.com" or host.endswith(".substack.com"):
         m = _SUBSTACK_V2.match(parts.path)
         if m:
+            segments = m.group(1).split(".")
             try:
-                payload = _b64url_json(m.group(1).split(".")[1])
+                payload = _b64url_json(segments[1] if len(segments) == 3 else segments[0])
             except (ValueError, binascii.Error, UnicodeDecodeError):
                 return None
             target = payload.get("e") if isinstance(payload, dict) else None

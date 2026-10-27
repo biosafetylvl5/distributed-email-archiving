@@ -34,6 +34,16 @@
       "fetch_url": "https://example.us1.list-manage.com/track/click?u=aa11&id=dd44&e=bb22"
     },
     {
+      "href": "https://example.us1.list-manage.com/CvccQjEdTpH?e=bb22&c2id=x1&m=y2",
+      "text": "summary",
+      "link_class": "tracking-redirect",
+      "decision": "resolve",
+      "reason": "mailchimp redirect, opaque",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": "https://example.us1.list-manage.com/CvccQjEdTpH?e=bb22&c2id=x1&m=y2"
+    },
+    {
       "href": "https://www.example.org/news/october?utm_source=newsletter&utm_medium=email&utm_campaign=oct&mc_cid=cc33&mc_eid=bb22",
       "text": "here is the news",
       "link_class": "content",

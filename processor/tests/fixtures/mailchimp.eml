@@ -10,7 +10,8 @@ Content-Type: text/html; charset=utf-8
 <html><body>
 <a href="https://mailchi.mp/example/october-update?e=bb22">View this email in your browser</a>
 <img src="https://mcusercontent.com/abc/images/logo.png" width="200" height="80" alt="Example Org">
-<p>Our <a href="https://example.us1.list-manage.com/track/click?u=aa11&amp;id=dd44&amp;e=bb22">annual report</a> is out,
+<p>Our <a href="https://example.us1.list-manage.com/track/click?u=aa11&amp;id=dd44&amp;e=bb22">annual report</a> is out
+(<a href="https://example.us1.list-manage.com/CvccQjEdTpH?e=bb22&amp;c2id=x1&amp;m=y2">summary</a>),
 and <a href="https://www.example.org/news/october?utm_source=newsletter&amp;utm_medium=email&amp;utm_campaign=oct&amp;mc_cid=cc33&amp;mc_eid=bb22">here is the news</a>.</p>
 <p><a href="https://www.example.org/events/42/rsvp?FORBIDDEN=rsvp">RSVP</a></p>
 <p><a href="https://example.us1.list-manage.com/subscribe/confirm?u=aa11&amp;id=ee55&amp;e=FORBIDDEN-confirm">Confirm subscription</a></p>
