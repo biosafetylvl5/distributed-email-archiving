@@ -12,7 +12,7 @@ import dea_capture.issue
 from dea_capture.fetch import HostPacer, TooLarge
 from dea_capture.guard import GuardedFetcher, IPAddress, Response
 from dea_capture.inventory import Inventory, inventory
-from dea_capture.issue import EXTRACT_VERSION, manifest_key, process_issue
+from dea_capture.issue import EXTRACT_VERSION, manifest_key, process_issue, status_key
 from dea_capture.store import LocalStore, put_json
 
 from .conftest import EML_FIXTURES, FORBIDDEN_MARKERS, fake_resolver, load
@@ -248,3 +248,37 @@ def test_stylesheet_reused_from_an_older_manifest_is_still_read(tmp_path: Path) 
     # the stylesheets come from the store; only what they refer to is fetched
     assert LETTER_CSS not in again.requested
     assert "https://www.example.com/img/hero.jpg" in again.requested
+
+
+def test_status_record_has_counts_and_no_urls(tmp_path: Path) -> None:
+    raw = load("generic.eml")
+    store = LocalStore(tmp_path)
+    _run(raw, store, FakeCDN(missing={"https://www.example.com/img/footer.png"}))
+    sha = hashlib.sha256(raw).hexdigest()
+    meta = store.metadata(status_key(sha))
+    assert meta is not None
+    assert meta["state"] == "partial"
+    assert meta["assets_failed"] == "1"
+    assert meta["source"] == "s3://bucket/incoming/archive/x.eml"
+    assert int(meta["links_skip"]) > 0
+    assert int(meta["links"]) == sum(
+        int(meta[f"links_{d}"]) for d in ("capture", "resolve", "skip")
+    )
+    assert all(isinstance(v, str) for v in meta.values())
+    assert not any("http" in v for k, v in meta.items() if k != "source")
+    body = json.loads(store.get(status_key(sha)) or b"")
+    assert body == {"sha256": sha, **meta}
+
+
+def test_skipped_issue_gets_a_missing_status(tmp_path: Path) -> None:
+    raw = load("generic.eml")
+    store = LocalStore(tmp_path)
+    _run(raw, store, FakeCDN())
+    sha = hashlib.sha256(raw).hexdigest()
+    before = store.metadata(status_key(sha))
+    (tmp_path / status_key(sha)).unlink()
+    again = FakeCDN()
+    result = _run(raw, store, again)
+    assert result.skipped and again.requested == []  # type: ignore[attr-defined]
+    assert store.metadata(status_key(sha)) == before
+    assert store.metadata(status_key(sha))["state"] == "done"  # type: ignore[index]

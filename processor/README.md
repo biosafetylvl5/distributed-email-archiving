@@ -66,10 +66,17 @@ that request is made.
   hrefs.
 - `assets/<sha256 of body><ext>`: each embed body and inline `cid:` part.
 - `assets/manifest.json`: one record per embed, with its status (`ok`,
-  `failed`, `refused`, `deferred:size`), redirect chain, size and type. It
-  is written last, so a message with a manifest is done and is skipped.
+  `failed`, `refused`, `deferred:size`, `deferred:budget`), redirect chain,
+  size and type. A message with a current manifest is done and is skipped.
   A manifest from an older `EXTRACT_VERSION` is redone incrementally: embeds
   it already stored are kept, and only new URLs are fetched.
+
+After the manifest it writes `issue-status/<sha256>.json`: counts only (embeds
+by status, tracking pixels, links by decision), the source key and `state`
+(`done`, or `partial` while any embed failed or was deferred). The same
+values are set as the object's metadata, so the admin dashboard reads them
+from one R2 listing. A message skipped as done gets its status file if it
+has none.
 
 Stored stylesheets are read too. The fonts and images they refer to are
 fetched as `css` embeds, resolved against the stylesheet's own URL, and their

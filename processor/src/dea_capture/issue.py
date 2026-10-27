@@ -12,6 +12,13 @@ Everything goes under ``issues/<sha256 of the .eml>/``:
   Written last, so its presence means the issue is done and a re-run (courier
   re-emits every key on restart) skips it.
 
+One more object sits outside that prefix, so the dashboard can list every
+issue's status without reading bodies:
+
+- ``issue-status/<sha>.json``: counts only, also set as the object's
+  metadata (R2 ``customMetadata``), plus the source key. Written after the
+  manifest; an issue skipped as done gets one if it's missing.
+
 Each embed is fetched once. Failures are recorded with their reason; the
 retry schedule comes with the capture stages.
 
@@ -32,11 +39,11 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from . import __version__
 from .extract import Embed, css_urls, parse
@@ -61,6 +68,52 @@ def issue_prefix(sha: str) -> str:
 
 def manifest_key(sha: str) -> str:
     return f"{issue_prefix(sha)}assets/manifest.json"
+
+
+def links_key(sha: str) -> str:
+    return f"{issue_prefix(sha)}links.json"
+
+
+def status_key(sha: str) -> str:
+    return f"issue-status/{sha}.json"
+
+
+def issue_status(manifest: dict[str, Any], links: dict[str, Any] | None) -> dict[str, str]:
+    """Counts for the dashboard, as R2 metadata: string values, no URLs.
+
+    ``state`` is ``partial`` while any embed failed or was deferred, else
+    ``done``; refused embeds are deliberate, so they don't count against it.
+    """
+    assets = manifest.get("assets", [])
+    by_status = Counter(str(a.get("status")) for a in assets)
+    deferred = sum(n for k, n in by_status.items() if k.startswith("deferred"))
+    link_list = (links or {}).get("links", [])
+    decisions = Counter(str(link.get("decision")) for link in link_list)
+    counts = {
+        "assets_ok": by_status["ok"],
+        "assets_failed": by_status["failed"],
+        "assets_refused": by_status["refused"],
+        "assets_deferred": deferred,
+        "pixels": sum(1 for a in assets if a.get("pixel")),
+        "links": len(link_list),
+        "links_capture": decisions["capture"],
+        "links_resolve": decisions["resolve"],
+        "links_skip": decisions["skip"],
+    }
+    return {
+        "source": str(manifest.get("source", "")),
+        "state": "partial" if by_status["failed"] or deferred else "done",
+        "extract_version": str(manifest.get("extract_version", 1)),
+        "completed_at": str(manifest.get("completed_at", "")),
+        **{k: str(v) for k, v in counts.items()},
+    }
+
+
+def write_status(
+    store: Store, sha: str, manifest: dict[str, Any], links: dict[str, Any] | None
+) -> None:
+    meta = issue_status(manifest, links)
+    put_json(store, status_key(sha), {"sha256": sha, **meta}, metadata=meta)
 
 
 @dataclass
@@ -162,13 +215,17 @@ def process_issue(
         if previous is not None:
             old = json.loads(previous)
             if old.get("extract_version", 1) >= EXTRACT_VERSION:
+                if not store.exists(status_key(sha)):
+                    links = store.get(links_key(sha))
+                    write_status(store, sha, old, json.loads(links) if links else None)
                 return IssueResult(sha, skipped=True, counts={})
             for a in old.get("assets", []):
                 if a.get("status") == "ok" and a.get("via") != "cid":
                     reuse[a["url"]] = AssetRecord(**a)
     pacer = pacer or HostPacer()
     inv = inventory(raw)
-    put_json(store, f"{issue_prefix(sha)}links.json", {"source": source, **inv.to_json()})
+    links_doc = {"source": source, **inv.to_json()}
+    put_json(store, links_key(sha), links_doc)
 
     fetcher = make_fetcher(inv)
     records: list[AssetRecord] = []
@@ -222,17 +279,15 @@ def process_issue(
         counts[rec.status] = counts.get(rec.status, 0) + 1
     if reused:
         counts["reused"] = reused
-    put_json(
-        store,
-        manifest_key(sha),
-        {
-            "source": source,
-            "sha256": sha,
-            "generator": f"dea-capture {__version__}",
-            "extract_version": EXTRACT_VERSION,
-            "completed_at": _now(),
-            "counts": counts,
-            "assets": [asdict(r) for r in records],
-        },
-    )
+    manifest = {
+        "source": source,
+        "sha256": sha,
+        "generator": f"dea-capture {__version__}",
+        "extract_version": EXTRACT_VERSION,
+        "completed_at": _now(),
+        "counts": counts,
+        "assets": [asdict(r) for r in records],
+    }
+    put_json(store, manifest_key(sha), manifest)
+    write_status(store, sha, manifest, links_doc)
     return IssueResult(sha, skipped=False, counts=counts)

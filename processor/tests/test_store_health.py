@@ -45,6 +45,25 @@ def test_s3_conditional_put() -> None:
         assert not s.put("k", b"d", "text/plain", if_absent=True)
 
 
+def test_s3_put_sends_metadata() -> None:
+    s = _s3()
+    with Stubber(s.client) as stub:
+        expected = {
+            "Bucket": "bucket", "Key": "k", "Body": b"d", "ContentType": "application/json",
+            "Metadata": {"state": "done"},
+        }  # fmt: skip
+        stub.add_response("put_object", {}, expected)
+        assert s.put("k", b"d", "application/json", metadata={"state": "done"})
+
+
+def test_local_store_keeps_metadata_out_of_the_way(tmp_path: Path) -> None:
+    s = LocalStore(tmp_path)
+    s.put("a/b.json", b"1", "application/json", metadata={"state": "done"})
+    assert s.metadata("a/b.json") == {"state": "done"}
+    assert s.metadata("a/c.json") is None
+    assert s.get("a/b.json") == b"1"
+
+
 def test_s3_exists() -> None:
     s = _s3()
     with Stubber(s.client) as stub:

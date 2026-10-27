@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -20,15 +21,22 @@ class Store(Protocol):
 
     def exists(self, key: str) -> bool: ...
 
-    def put(self, key: str, data: bytes, content_type: str, *, if_absent: bool = False) -> bool:
+    def put(
+        self, key: str, data: bytes, content_type: str, *, if_absent: bool = False,
+        metadata: Mapping[str, str] | None = None,
+    ) -> bool:  # fmt: skip
         """Write ``key``. With ``if_absent``, returns False instead of
-        overwriting an existing object."""
+        overwriting an existing object. ``metadata`` becomes the object's
+        user metadata (R2 ``customMetadata``)."""
         ...
 
 
-def put_json(store: Store, key: str, obj: object, *, if_absent: bool = False) -> bool:
+def put_json(
+    store: Store, key: str, obj: object, *, if_absent: bool = False,
+    metadata: Mapping[str, str] | None = None,
+) -> bool:  # fmt: skip
     data = (json.dumps(obj, indent=2, sort_keys=False) + "\n").encode()
-    return store.put(key, data, "application/json", if_absent=if_absent)
+    return store.put(key, data, "application/json", if_absent=if_absent, metadata=metadata)
 
 
 @dataclass
@@ -48,7 +56,18 @@ class LocalStore:
     def exists(self, key: str) -> bool:
         return self._path(key).is_file()
 
-    def put(self, key: str, data: bytes, content_type: str, *, if_absent: bool = False) -> bool:
+    def _meta_path(self, key: str) -> Path:
+        return self._path(f".meta/{key}.json")
+
+    def metadata(self, key: str) -> dict[str, str] | None:
+        """What ``put`` was given as ``metadata``, kept beside the store."""
+        path = self._meta_path(key)
+        return json.loads(path.read_text()) if path.is_file() else None
+
+    def put(
+        self, key: str, data: bytes, content_type: str, *, if_absent: bool = False,
+        metadata: Mapping[str, str] | None = None,
+    ) -> bool:  # fmt: skip
         path = self._path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         if if_absent:
@@ -57,10 +76,14 @@ class LocalStore:
                     f.write(data)
             except FileExistsError:
                 return False
-            return True
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_bytes(data)
-        tmp.replace(path)
+        else:
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_bytes(data)
+            tmp.replace(path)
+        if metadata is not None:
+            meta = self._meta_path(key)
+            meta.parent.mkdir(parents=True, exist_ok=True)
+            meta.write_text(json.dumps(dict(metadata), sort_keys=True))
         return True
 
 
@@ -97,12 +120,17 @@ class S3Store:
             raise
         return True
 
-    def put(self, key: str, data: bytes, content_type: str, *, if_absent: bool = False) -> bool:
+    def put(
+        self, key: str, data: bytes, content_type: str, *, if_absent: bool = False,
+        metadata: Mapping[str, str] | None = None,
+    ) -> bool:  # fmt: skip
         from botocore.exceptions import ClientError
 
         kwargs: dict[str, Any] = {
             "Bucket": self.bucket, "Key": key, "Body": data, "ContentType": content_type,
         }  # fmt: skip
+        if metadata:
+            kwargs["Metadata"] = dict(metadata)
         if if_absent:
             kwargs["IfNoneMatch"] = "*"
         try:
