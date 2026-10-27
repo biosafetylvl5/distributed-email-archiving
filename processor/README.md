@@ -9,11 +9,13 @@ reader of a message would encounter and fetches it once. It never follows a
 link that would change the subscription or act publicly in the subscriber's
 name.
 
-**Status: phase 1.** Extraction, classification and the safety guards
-exist and are tested. The first capture stage, `issue`, fetches and stores
-every embed of each archived message. It runs as a
-[courier](https://github.com/CIRA-GEOIPS/courier) service. Link capture
-comes in later phases.
+**Status: phase 3, first half.** Extraction, classification and the safety
+guards exist and are tested. The `issue` stage stores every embed of each
+archived message, then resolves its links and queues each landing page once.
+`capture` stores direct downloads (PDFs, images, files), retries failures on
+a schedule and falls back to the Wayback Machine. It all runs as a
+[courier](https://github.com/CIRA-GEOIPS/courier) service. Page capture
+(Browsertrix) and media capture (yt-dlp) come next.
 
 ## What it does with each link
 
@@ -78,6 +80,18 @@ values are set as the object's metadata, so the admin dashboard reads them
 from one R2 listing. A message skipped as done gets its status file if it
 has none.
 
+Then the links. Each distinct `resolve` href is followed once, reading
+status lines and headers only, with every hop checked by the guard. A hop
+that carries an auth parameter, or any parameter whose value is an email
+address, is never requested: the chain stops there and its canonical URL
+counts as the landing page. Each landing page, and each
+`capture` link's canonical URL, is queued for capture (see below). The
+results go to `issues/<sha256>/captures.json`, private like `links.json`, and
+the status file gains `links_state` (`pending`, `done`, or `partial` when a
+redirect couldn't be followed) with counts of what was resolved and queued.
+A message whose embeds are already done still gets its links resolved, once.
+`--no-links` skips this half.
+
 Stored stylesheets are read too. The fonts and images they refer to are
 fetched as `css` embeds, resolved against the stylesheet's own URL, and their
 `@import`s as `css-import`, up to three stylesheets deep. Each record notes
@@ -90,12 +104,43 @@ ranges to refuse, such as the cluster's pod and service networks.
 `DEA_MODE=dry-run` makes it print counts and fetch nothing. Its stdout is one
 line of counts per message, with no URLs.
 
+## Link capture
+
+Every canonical URL is captured once, however many messages link to it. With
+`h` = sha256 of the canonical URL:
+
+- `captures/index/<h>.json` is its record: kind (`page`, `direct` or
+  `media`), status (`queued`, `retrying`, `ok`, `failed`, `refused`,
+  `deferred`), every attempt, and where the good capture is. Status, kind and
+  attempt count are also its metadata, for the dashboard. It is created
+  with `If-None-Match: *`, so exactly one message queues each URL.
+- `captures/due/<kind>/<UTC time>-<h>.json` means "capture `h` at or after
+  this time". This is the queue and the retry schedule. A capture first
+  moves its key to a lease an hour ahead, so one that dies runs again then.
+- `captures/<h[:2]>/<h>/<time>/` holds one attempt's files: the body as
+  `original<ext>` and `capture.json` with the status, headers, redirect
+  chain, size and sha256.
+
+`dea-capture capture s3://bucket/captures/due/direct/<key>.json` runs one.
+If the body turns out to be HTML, the URL moves to the `page` queue. Bodies
+over 100 MiB are `deferred`, and refusals by the guard are final. Failures
+(network errors, 4xx and 5xx) are retried 1 h, 6 h, 1 d, 7 d and 30 d
+later. After the last one, the Wayback Machine snapshot closest to when the
+URL was first queued is stored instead, its original bytes (`id_`), not
+the Wayback page around them.
+
+Only canonical URLs, with tracking and auth parameters and email addresses
+removed, are stored under `captures/`.
+
 ## Running it as a service
 
-`deploy/service.yaml` is the courier service: an S3 poller on
-`incoming/archive/`, one job per `.eml`, and a local dispatcher that runs
-`dea-capture issue`. It needs `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
-and `AWS_ENDPOINT_URL` (the R2 S3 endpoint) in the environment. The object
+`deploy/service.yaml` is the courier service. An S3 poller on
+`incoming/archive/` makes one job per `.eml` for `dea-capture issue`. An
+`s3_due_poller` on `captures/due/direct/` makes one job per due key for
+`dea-capture capture`. That poller is courier's S3 poller, except that it
+emits a key only once the time in its name has passed. It comes with this
+package as a courier plugin. The service needs `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY` and `AWS_ENDPOINT_URL` (the R2 S3 endpoint) in the environment. The object
 key is passed as its own argument, never through a shell.
 
 The `Dockerfile` builds it with courier pinned to a commit (the `service`
@@ -104,7 +149,7 @@ linux/amd64 on every push to `main` that touches `processor/`.
 
 Courier never restarts a crashed plugin, and the process keeps looking
 healthy. Use `dea-capture healthcheck` as the liveness probe. It fails
-when the poller's last completed scan, from courier's metrics on port 8000,
+when any poller's last completed scan, from courier's metrics on port 8000,
 is older than `--max-scan-age` (default 900 s). Give it a startup probe
 with room for the first full scan.
 

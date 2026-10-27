@@ -1,8 +1,9 @@
 """``dea-capture`` command line.
 
 ``inventory`` is the offline dry run. ``issue`` is the first capture stage:
-it stores one message's embeds and link inventory. ``healthcheck`` is the
-pod's liveness probe. The link capture stages follow in later phases.
+it stores one message's embeds and link inventory, then resolves its links and
+queues them. ``capture`` runs one queued capture. ``healthcheck`` is the pod's
+liveness probe.
 """
 
 from __future__ import annotations
@@ -14,9 +15,10 @@ import os
 import sys
 from collections import Counter
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
-from . import __version__, health
+from . import __version__, capture, health
 from .fetch import HttpFetcher
 from .guard import GuardedFetcher, IPNetwork
 from .inventory import Inventory, inventory
@@ -73,12 +75,42 @@ def _cmd_issue(args: argparse.Namespace) -> int:
         return 0
 
     blocked = _extra_blocked()
-    http = HttpFetcher(user_agent=os.environ.get("DEA_USER_AGENT") or HttpFetcher().user_agent)
+    http = HttpFetcher(user_agent=_user_agent())
+    # resolving reads status lines and headers, never bodies
+    heads = HttpFetcher(user_agent=_user_agent(), max_bytes=0, truncate=True)
 
     def make_fetcher(inv: Inventory) -> GuardedFetcher:
         return GuardedFetcher(http, extra_blocked=blocked, refused_urls=inv.refused_urls())
 
-    result = process_issue(raw, store, make_fetcher, source=source, force=args.force)
+    def make_resolver(inv: Inventory) -> GuardedFetcher:
+        return GuardedFetcher(heads, extra_blocked=blocked, refused_urls=inv.refused_urls())
+
+    result = process_issue(
+        raw, store, make_fetcher, source=source, force=args.force,
+        make_resolver=None if args.no_links else make_resolver,
+    )  # fmt: skip
+    print(result.line())
+    return 0
+
+
+def _user_agent() -> str:
+    return os.environ.get("DEA_USER_AGENT") or HttpFetcher().user_agent
+
+
+# bodies are held in memory; a bigger one is deferred for capture-media
+DIRECT_MAX_BYTES = 100 * 1024 * 1024
+
+
+def _cmd_capture(args: argparse.Namespace) -> int:
+    bucket, key = split_s3_uri(args.due)
+    store = S3Store(bucket)
+    blocked = _extra_blocked()
+    http = HttpFetcher(user_agent=_user_agent(), max_bytes=DIRECT_MAX_BYTES, total_timeout=300)
+    fetcher = GuardedFetcher(http, extra_blocked=blocked)
+    result = capture.run(
+        store, key, fetcher, now=datetime.now(UTC),
+        wayback_fetcher=None if args.no_wayback else fetcher,
+    )  # fmt: skip
     print(result.line())
     return 0
 
@@ -129,7 +161,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--out", metavar="DIR", help="write to this directory, not the bucket")
     p.add_argument("--force", action="store_true", help="redo a message that is already done")
     p.add_argument("--dry-run", action="store_true", help="fetch and write nothing")
+    p.add_argument("--no-links", action="store_true", help="embeds only: don't resolve or queue")
     p.set_defaults(func=_cmd_issue)
+
+    p = sub.add_parser(
+        "capture",
+        help="run one queued capture",
+        description=(
+            "Run the capture a captures/due/<kind>/ key asks for: request the canonical URL, "
+            "store what comes back under captures/, and schedule a retry if it failed. After "
+            "the last retry, store the closest Wayback Machine snapshot instead. Prints one "
+            "line with no URLs."
+        ),
+    )
+    p.add_argument("due", metavar="DUE", help="s3://bucket/captures/due/<kind>/<key>.json")
+    p.add_argument("--no-wayback", action="store_true", help="no Wayback Machine fallback")
+    p.set_defaults(func=_cmd_capture)
 
     p = sub.add_parser("healthcheck", help="liveness probe for the courier service")
     p.add_argument("--metrics", default="http://127.0.0.1:8000/metrics")

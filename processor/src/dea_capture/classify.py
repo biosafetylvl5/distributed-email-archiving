@@ -108,8 +108,20 @@ def query_keys(url: str) -> set[str]:
     return {k.lower() for k, _ in parse_qsl(urlsplit(url).query, keep_blank_values=True)}
 
 
+# a parameter value that is an email address names the reader as surely as a
+# token does (Substack's signup links carry ``freeSignupEmail=<address>``)
+# (the local part may hold spaces: a "+" in an address decodes to one)
+_EMAIL_VALUE = re.compile(r"^[^@/?#]+@[^@\s/?#]+\.[a-z]{2,}$", re.IGNORECASE)
+
+
+def _is_email(value: str) -> bool:
+    return bool(_EMAIL_VALUE.match(value.strip()))
+
+
 def has_auth_param(url: str) -> bool:
-    return bool(AUTH_PARAMS & query_keys(url))
+    """True when ``url`` carries an auth parameter or an email address."""
+    pairs = parse_qsl(urlsplit(url).query, keep_blank_values=True)
+    return any(k.lower() in AUTH_PARAMS or _is_email(v) for k, v in pairs)
 
 
 # ── canonicalization ────────────────────────────────────────────────────────
@@ -118,7 +130,8 @@ _OPEN_SUBSTACK = re.compile(r"^/pub/([a-z0-9-]+)/p/([^/]+)/?$", re.IGNORECASE)
 
 
 def canonicalize(url: str) -> str:
-    """The dedupe key for a web URL: tracking and auth parameters removed,
+    """The dedupe key for a web URL: tracking and auth parameters, and any
+    parameter whose value is an email address, removed,
     scheme and host lowercased, default port, fragment and any credentials
     dropped, and known publisher aliases rewritten. Parameter order is
     otherwise preserved."""
@@ -135,7 +148,7 @@ def canonicalize(url: str) -> str:
     pairs = parse_qsl(parts.query, keep_blank_values=True)
     substack = _is_substack(host, (k.lower() for k, _ in pairs))
     mailchimp = bool(_MAILCHIMP_HOSTS.search(host))
-    kept = [(k, v) for k, v in pairs if not _strip(k, substack, mailchimp)]
+    kept = [(k, v) for k, v in pairs if not _strip(k, substack, mailchimp) and not _is_email(v)]
     path = parts.path or "/"
     if host == "open.substack.com" and (m := _OPEN_SUBSTACK.match(path)):
         netloc, path = f"{m.group(1).lower()}.substack.com", f"/p/{m.group(2)}"

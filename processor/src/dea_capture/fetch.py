@@ -45,6 +45,9 @@ class HttpFetcher:
     # for the whole response, not per read
     total_timeout: float = 60.0
     max_bytes: int = 50 * 1024 * 1024
+    # cut bodies at max_bytes instead of raising TooLarge; with max_bytes=0
+    # only the status and headers are read (redirect resolution)
+    truncate: bool = False
     # never set outside tests: lets a test server on 127.0.0.1 present no TLS
     _https: bool = field(default=True, repr=False)
 
@@ -96,8 +99,10 @@ class HttpFetcher:
         raise FetchError("; ".join(errors) or "no addresses")
 
     def _read(self, resp: urllib3.BaseHTTPResponse) -> bytes:
+        if self.truncate and self.max_bytes == 0:
+            return b""
         declared = resp.headers.get("content-length", "")
-        if declared.isdigit() and int(declared) > self.max_bytes:
+        if not self.truncate and declared.isdigit() and int(declared) > self.max_bytes:
             raise TooLarge(self.max_bytes)
         deadline = time.monotonic() + self.total_timeout
         chunks: list[bytes] = []
@@ -106,6 +111,9 @@ class HttpFetcher:
             for chunk in resp.stream(64 * 1024):
                 size += len(chunk)
                 if size > self.max_bytes:
+                    if self.truncate:
+                        chunks.append(chunk[: len(chunk) - (size - self.max_bytes)])
+                        break
                     raise TooLarge(self.max_bytes)
                 if time.monotonic() > deadline:
                     raise FetchError("response took too long")

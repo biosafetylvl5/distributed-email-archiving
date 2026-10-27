@@ -74,6 +74,19 @@ def test_size_cap(server: int) -> None:
         )
 
 
+def test_headers_only_reads_no_body(server: int) -> None:
+    f = HttpFetcher(max_bytes=0, truncate=True, _https=False)
+    resp = f.get(f"http://x.invalid:{server}/big", addresses=LOCAL)
+    assert (resp.status, resp.body) == (200, b"")
+    assert resp.headers["content-length"] == "5000"
+
+
+def test_truncate_cuts_instead_of_raising(server: int) -> None:
+    f = HttpFetcher(max_bytes=1000, truncate=True, _https=False)
+    resp = f.get(f"http://x.invalid:{server}/big", addresses=LOCAL)
+    assert resp.body == b"x" * 1000
+
+
 def test_unreachable_is_retryable() -> None:
     with pytest.raises(FetchError):
         HttpFetcher(connect_timeout=1, _https=False).get(

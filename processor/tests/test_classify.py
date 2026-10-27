@@ -217,3 +217,15 @@ def test_unsubscribe_like_slug_errs_towards_skip() -> None:
     """Known false positive, accepted: a skipped link can be captured by hand."""
     c = classify("https://www.example.com/unsubscribe-from-the-news-cycle", "A post")
     assert c.link_class == LinkClass.UNSUBSCRIBE
+
+
+def test_an_email_address_in_a_parameter_is_treated_like_a_token() -> None:
+    from dea_capture.classify import canonicalize, has_auth_param
+
+    url = "https://substack.com/onboarding?flow=x&freeSignupEmail=reader%40example.com"
+    assert has_auth_param(url)
+    assert canonicalize(url) == "https://substack.com/onboarding?flow=x"
+    assert has_auth_param("https://substack.com/signup?freeSignupEmail=reader+news@example.com")
+    assert not has_auth_param("https://example.org/search?q=at%40home")
+    c = classify(url, "Sign up", ())
+    assert c.fetch_url is not None and "example.com" not in c.fetch_url

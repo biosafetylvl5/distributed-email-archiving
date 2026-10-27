@@ -21,6 +21,9 @@ service = [
 [project.scripts]
 dea-capture = "dea_capture.cli:main"
 
+[project.entry-points."courier.data_monitors"]
+s3_due_poller = "dea_capture.courier_plugin:S3DuePoller"
+
 [dependency-groups]
 dev = [
     "mypy>=1.10",
@@ -52,3 +55,8 @@ python_version = "3.11"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[[tool.mypy.overrides]]
+# courier comes with the service extra, which the dev environment doesn't install
+module = ["courier.*"]
+ignore_missing_imports = true

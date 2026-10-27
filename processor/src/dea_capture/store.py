@@ -8,6 +8,7 @@ conditional ``If-None-Match: *`` PUT, so two workers can't both win.
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -28,6 +29,10 @@ class Store(Protocol):
         """Write ``key``. With ``if_absent``, returns False instead of
         overwriting an existing object. ``metadata`` becomes the object's
         user metadata (R2 ``customMetadata``)."""
+        ...
+
+    def delete(self, key: str) -> None:
+        """Remove ``key``; a missing key is not an error."""
         ...
 
 
@@ -55,6 +60,10 @@ class LocalStore:
 
     def exists(self, key: str) -> bool:
         return self._path(key).is_file()
+
+    def delete(self, key: str) -> None:
+        self._path(key).unlink(missing_ok=True)
+        self._meta_path(key).unlink(missing_ok=True)
 
     def _meta_path(self, key: str) -> Path:
         return self._path(f".meta/{key}.json")
@@ -141,6 +150,18 @@ class S3Store:
                 return False
             raise
         return True
+
+    def delete(self, key: str) -> None:
+        self.client.delete_object(Bucket=self.bucket, Key=key)
+
+
+def ext_for(content_type: str | None, url: str) -> str:
+    """A file extension for a body, from its type, else from its URL."""
+    base = (content_type or "").split(";")[0].strip().lower()
+    ext = mimetypes.guess_extension(base) if base else None
+    if ext is None:
+        ext = mimetypes.guess_extension(mimetypes.guess_type(url.split("?")[0])[0] or "") or ""
+    return {".jpe": ".jpg", ".jpeg": ".jpg"}.get(ext, ext)
 
 
 def split_s3_uri(uri: str) -> tuple[str, str]:

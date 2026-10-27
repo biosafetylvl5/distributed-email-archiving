@@ -22,6 +22,9 @@ issue's status without reading bodies:
 Each embed is fetched once. Failures are recorded with their reason; the
 retry schedule comes with the capture stages.
 
+With ``make_resolver``, the links are then resolved and queued for capture
+(see ``links``), also for issues whose embeds are already done.
+
 A manifest written by an older ``EXTRACT_VERSION`` is redone incrementally:
 the message is inventoried again, embeds the old manifest already has as
 ``ok`` are carried over without a request, and only the rest are fetched.
@@ -38,7 +41,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import mimetypes
 from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -50,7 +52,8 @@ from .extract import Embed, css_urls, parse
 from .fetch import FetchError, HostPacer, TooLarge, follow
 from .guard import ForbiddenFetch, GuardedFetcher
 from .inventory import Inventory, inventory
-from .store import Store, put_json
+from .links import captures_key, link_counts, load_links, process_links
+from .store import Store, ext_for, put_json
 
 Status = Literal["ok", "failed", "refused", "deferred:size", "deferred:budget"]
 
@@ -78,11 +81,16 @@ def status_key(sha: str) -> str:
     return f"issue-status/{sha}.json"
 
 
-def issue_status(manifest: dict[str, Any], links: dict[str, Any] | None) -> dict[str, str]:
+def issue_status(
+    manifest: dict[str, Any], links: dict[str, Any] | None, captures: dict[str, Any] | None = None
+) -> dict[str, str]:
     """Counts for the dashboard, as R2 metadata: string values, no URLs.
 
     ``state`` is ``partial`` while any embed failed or was deferred, else
     ``done``; refused embeds are deliberate, so they don't count against it.
+    ``links_state`` is ``pending`` until the links are resolved and queued,
+    then ``partial`` if any tracking redirect couldn't be followed, else
+    ``done``.
     """
     assets = manifest.get("assets", [])
     by_status = Counter(str(a.get("status")) for a in assets)
@@ -99,20 +107,30 @@ def issue_status(manifest: dict[str, Any], links: dict[str, Any] | None) -> dict
         "links_capture": decisions["capture"],
         "links_resolve": decisions["resolve"],
         "links_skip": decisions["skip"],
+        **link_counts(captures),
     }
+    if captures is None:
+        links_state = "pending"
+    else:
+        links_state = "partial" if counts.get("links_unresolved") else "done"
     return {
         "source": str(manifest.get("source", "")),
         "state": "partial" if by_status["failed"] or deferred else "done",
         "extract_version": str(manifest.get("extract_version", 1)),
         "completed_at": str(manifest.get("completed_at", "")),
+        "links_state": links_state,
         **{k: str(v) for k, v in counts.items()},
     }
 
 
 def write_status(
-    store: Store, sha: str, manifest: dict[str, Any], links: dict[str, Any] | None
+    store: Store,
+    sha: str,
+    manifest: dict[str, Any],
+    links: dict[str, Any] | None,
+    captures: dict[str, Any] | None = None,
 ) -> None:
-    meta = issue_status(manifest, links)
+    meta = issue_status(manifest, links, captures)
     put_json(store, status_key(sha), {"sha256": sha, **meta}, metadata=meta)
 
 
@@ -149,14 +167,6 @@ class IssueResult:
         return f"ISSUE {self.sha256} {detail}"
 
 
-def _ext(content_type: str | None, url: str) -> str:
-    base = (content_type or "").split(";")[0].strip().lower()
-    ext = mimetypes.guess_extension(base) if base else None
-    if ext is None:
-        ext = mimetypes.guess_extension(mimetypes.guess_type(url.split("?")[0])[0] or "") or ""
-    return {".jpe": ".jpg", ".jpeg": ".jpg"}.get(ext, ext)
-
-
 def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -165,7 +175,7 @@ def _store_body(
     store: Store, sha: str, body: bytes, content_type: str | None, url: str
 ) -> tuple[str, str]:
     digest = hashlib.sha256(body).hexdigest()
-    key = f"{issue_prefix(sha)}assets/{digest}{_ext(content_type, url)}"
+    key = f"{issue_prefix(sha)}assets/{digest}{ext_for(content_type, url)}"
     store.put(key, body, content_type or "application/octet-stream", if_absent=True)
     return key, digest
 
@@ -207,22 +217,29 @@ def process_issue(
     source: str,
     force: bool = False,
     pacer: HostPacer | None = None,
+    make_resolver: Callable[[Inventory], GuardedFetcher] | None = None,
 ) -> IssueResult:
     sha = hashlib.sha256(raw).hexdigest()
+    pacer = pacer or HostPacer()
     reuse: dict[str, AssetRecord] = {}
     if not force:
         previous = store.get(manifest_key(sha))
         if previous is not None:
             old = json.loads(previous)
             if old.get("extract_version", 1) >= EXTRACT_VERSION:
+                links_data = store.get(links_key(sha))
+                links = json.loads(links_data) if links_data else None
+                if make_resolver is not None and not store.exists(captures_key(sha)):
+                    inv = inventory(raw)
+                    doc = process_links(sha, inv, store, make_resolver(inv), pacer=pacer)
+                    write_status(store, sha, old, links, doc)
+                    return IssueResult(sha, skipped=False, counts=_link_line(doc))
                 if not store.exists(status_key(sha)):
-                    links = store.get(links_key(sha))
-                    write_status(store, sha, old, json.loads(links) if links else None)
+                    write_status(store, sha, old, links, load_links(store, sha))
                 return IssueResult(sha, skipped=True, counts={})
             for a in old.get("assets", []):
                 if a.get("status") == "ok" and a.get("via") != "cid":
                     reuse[a["url"]] = AssetRecord(**a)
-    pacer = pacer or HostPacer()
     inv = inventory(raw)
     links_doc = {"source": source, **inv.to_json()}
     put_json(store, links_key(sha), links_doc)
@@ -289,5 +306,13 @@ def process_issue(
         "assets": [asdict(r) for r in records],
     }
     put_json(store, manifest_key(sha), manifest)
-    write_status(store, sha, manifest, links_doc)
+    captures = None if force else load_links(store, sha)
+    if make_resolver is not None and captures is None:
+        captures = process_links(sha, inv, store, make_resolver(inv), pacer=pacer)
+        counts.update(_link_line(captures))
+    write_status(store, sha, manifest, links_doc, captures)
     return IssueResult(sha, skipped=False, counts=counts)
+
+
+def _link_line(doc: dict[str, Any]) -> dict[str, int]:
+    return {k: v for k, v in link_counts(doc).items() if v}

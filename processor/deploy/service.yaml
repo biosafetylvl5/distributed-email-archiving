@@ -1,8 +1,16 @@
 # The courier service that runs dea-capture: one pod, in-memory broker.
 #
-#   watch-issues   polls the archive for new .eml objects
-#   issue-builder  makes one job per message
-#   issue          runs `dea-capture issue s3://<bucket>/<key>`
+#   watch-issues    polls the archive for new .eml objects
+#   issue-builder   makes one job per message
+#   issue           runs `dea-capture issue s3://<bucket>/<key>`: embeds, then
+#                   resolves the links and queues them under captures/due/
+#   watch-direct    emits captures/due/direct/ keys once their time has come
+#   direct-builder  makes one job per due key
+#   capture-direct  runs `dea-capture capture s3://<bucket>/<due key>`
+#
+# Each builder takes only its own monitor's keys, by the monitor's hostname.
+# Page and media captures queue under captures/due/page/ and media/ and wait
+# there until their stages exist.
 #
 # Credentials and the R2 endpoint come from the environment (AWS_ACCESS_KEY_ID,
 # AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL), never from this file. On restart the
@@ -30,11 +38,13 @@ spec:
           region: auto
           poll_interval_seconds: 300
           run_on_start: true
+          hostname: issues
     - issue-builder:
         kind: job_builder
         name: filter_and_group
         config:
           files_per_job: 1
+          filters: {hostname: issues}
           targets:
             - issue
           payload:
@@ -54,4 +64,40 @@ spec:
         config:
           max_workers: 2
           timeout_seconds: 1800
+          log_to_logger: true
+    - watch-direct:
+        kind: data_monitor
+        name: s3_due_poller
+        config:
+          bucket: newsletter-archive
+          prefix: captures/due/direct/
+          suffix_filter: [".json"]
+          region: auto
+          poll_interval_seconds: 60
+          run_on_start: true
+          hostname: due-direct
+    - direct-builder:
+        kind: job_builder
+        name: filter_and_group
+        config:
+          files_per_job: 1
+          filters: {hostname: due-direct}
+          targets:
+            - capture-direct
+          payload:
+            direct-payload:
+              kind: payload
+              name: shell_payload
+              config:
+                binary: dea-capture
+                prefix_args:
+                  - capture
+                  - "{{ files[0].file }}"
+    - capture-direct:
+        kind: dispatcher
+        name: local_dispatcher
+        config:
+          # one 100 MiB body in memory at a time
+          max_workers: 1
+          timeout_seconds: 900
           log_to_logger: true
