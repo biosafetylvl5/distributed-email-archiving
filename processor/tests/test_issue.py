@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import dea_capture.issue
 from dea_capture.fetch import HostPacer, TooLarge
 from dea_capture.guard import GuardedFetcher, IPAddress, Response
 from dea_capture.inventory import Inventory, inventory
@@ -24,6 +25,8 @@ class FakeCDN:
     missing: set[str] = field(default_factory=set)
     huge: set[str] = field(default_factory=set)
     redirects: dict[str, str] = field(default_factory=dict)
+    # url -> (content type, body); everything else is a small PNG
+    bodies: dict[str, tuple[str, bytes]] = field(default_factory=dict)
     requested: list[str] = field(default_factory=list)
 
     def get(self, url: str, *, addresses: Sequence[IPAddress]) -> Response:
@@ -35,6 +38,9 @@ class FakeCDN:
             return Response(url, 301, {"location": self.redirects[url]}, b"")
         if url in self.missing:
             return Response(url, 404, {"content-type": "text/html"}, b"gone")
+        if url in self.bodies:
+            ctype, body = self.bodies[url]
+            return Response(url, 200, {"content-type": ctype}, body)
         return Response(url, 200, {"content-type": "image/png"}, b"PNG:" + url.encode())
 
 
@@ -170,3 +176,75 @@ def _manifest_fresh(raw: bytes, tmp_path: Path) -> list[dict]:  # type: ignore[t
     store = LocalStore(tmp_path / "fresh")
     _run(raw, store, FakeCDN())
     return _manifest(store, raw)["assets"]  # type: ignore[no-any-return]
+
+
+LETTER_CSS = "https://www.example.com/css/letter.css"
+FONTS_CSS = "https://fonts.example.com/css?family=Serif"
+
+
+def _css_cdn(**kw: object) -> FakeCDN:
+    return FakeCDN(
+        bodies={
+            LETTER_CSS: (
+                "text/css",
+                b"@import 'nested.css'; .hero{background:url(../img/hero.jpg)}"
+                b" .x{background:url(data:image/png;base64,AA)}"
+                b" .dup{background:url(https://www.example.com/img/banner.jpg)}",
+            ),
+            "https://www.example.com/css/nested.css": (
+                "text/css",
+                b"@import url(deeper.css); .n{background:url(n.png)}",
+            ),
+            "https://www.example.com/css/deeper.css": (
+                "text/css; charset=utf-8",
+                b"@import 'deepest.css'; .d{background:url(d.png)}",
+            ),
+            "https://www.example.com/css/deepest.css": ("text/css", b".z{background:url(z.png)}"),
+            FONTS_CSS: ("text/css", b"@font-face{src:url(/s/serif-latin.woff2)}"),
+        },
+        **kw,  # type: ignore[arg-type]
+    )
+
+
+def test_stylesheets_are_followed(tmp_path: Path) -> None:
+    raw = load("generic.eml")
+    store, cdn = LocalStore(tmp_path), _css_cdn()
+    result = _run(raw, store, cdn)
+    by_url = {a["url"]: a for a in _manifest(store, raw)["assets"]}
+    hero = by_url["https://www.example.com/img/hero.jpg"]
+    assert (hero["via"], hero["found_in"], hero["status"]) == ("css", LETTER_CSS, "ok")
+    assert by_url["https://www.example.com/css/nested.css"]["via"] == "css-import"
+    assert by_url["https://fonts.example.com/s/serif-latin.woff2"]["found_in"] == FONTS_CSS
+    for depth in ("n.png", "deeper.css", "d.png", "deepest.css"):
+        assert by_url[f"https://www.example.com/css/{depth}"]["status"] == "ok"
+    # three stylesheets deep and no further: deepest.css is stored, not read
+    assert "https://www.example.com/css/z.png" not in by_url
+    # nothing twice, no data: URIs
+    assert cdn.requested.count("https://www.example.com/img/banner.jpg") == 1
+    assert not any(u.startswith("data:") for u in by_url)
+    assert "from_css=" in result.line()  # type: ignore[attr-defined]
+
+
+def test_stylesheet_assets_have_a_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dea_capture.issue, "MAX_CSS_ASSETS", 2)
+    raw = load("generic.eml")
+    store = LocalStore(tmp_path)
+    _run(raw, store, _css_cdn())
+    css = [a for a in _manifest(store, raw)["assets"] if a["found_in"]]
+    assert [a["status"] for a in css][:2] == ["ok", "ok"]
+    assert {a["status"] for a in css[2:]} == {"deferred:budget"}
+
+
+def test_stylesheet_reused_from_an_older_manifest_is_still_read(tmp_path: Path) -> None:
+    raw = load("generic.eml")
+    store = LocalStore(tmp_path)
+    _run(raw, store, _css_cdn())
+    m = _manifest(store, raw)
+    m["extract_version"] = EXTRACT_VERSION - 1
+    m["assets"] = [a for a in m["assets"] if not a["found_in"]]
+    put_json(store, manifest_key(m["sha256"]), m)
+    again = _css_cdn()
+    _run(raw, store, again)
+    # the stylesheets come from the store; only what they refer to is fetched
+    assert LETTER_CSS not in again.requested
+    assert "https://www.example.com/img/hero.jpg" in again.requested

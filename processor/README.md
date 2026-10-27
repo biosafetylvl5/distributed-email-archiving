@@ -33,8 +33,8 @@ but a fetched unsubscribe link can't be undone. Some redirects carry their
 target in the URL, such as Substack's `/redirect/2/<jwt>`. Those are decoded
 offline, so they can be classified and deduplicated before any request.
 
-Embeds (images, `srcset`, `background=`, CSS `url()`, stylesheets) are
-always fetched. That includes tracking pixels, which are flagged, because a
+Embeds (images, `srcset`, `background=`, video posters, image inputs, icon
+links, CSS `url()` and `@import`, stylesheets) are always fetched. That includes tracking pixels, which are flagged, because a
 reader's mail client loads them too.
 
 ## Safety guards
@@ -70,6 +70,12 @@ that request is made.
   is written last, so a message with a manifest is done and is skipped.
   A manifest from an older `EXTRACT_VERSION` is redone incrementally: embeds
   it already stored are kept, and only new URLs are fetched.
+
+Stored stylesheets are read too. The fonts and images they refer to are
+fetched as `css` embeds, resolved against the stylesheet's own URL, and their
+`@import`s as `css-import`, up to three stylesheets deep. Each record notes
+`found_in`, the stylesheet that referred to it. After 300 such files in one
+message, the rest are recorded as `deferred:budget`.
 
 Requests to one host are at least a second apart. Bodies over 50 MiB are
 deferred, not fetched. `DEA_EXTRA_BLOCKED` (comma-separated CIDRs) adds

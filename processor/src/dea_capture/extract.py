@@ -11,11 +11,20 @@ import re
 from dataclasses import dataclass, field
 from email import policy
 from email.message import EmailMessage
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
 
-CSS_URL_RE = re.compile(r"url\(\s*['\"]?(https?://[^'\")\s]+)['\"]?\s*\)", re.IGNORECASE)
+_CSS_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+# @import "x.css"; @import 'x.css'; @import url(x.css) -- the url() form is
+# matched first so its URL is reported once, as an import
+_CSS_IMPORT = re.compile(
+    r"""@import\s+(?:url\(\s*(?P<q1>['"]?)(?P<u1>[^'")]*?)(?P=q1)\s*\)|(?P<q2>['"])(?P<u2>.*?)(?P=q2))""",
+    re.IGNORECASE | re.DOTALL,
+)
+_CSS_URL = re.compile(r"""url\(\s*(?P<q>['"]?)(?P<u>[^'")]*?)(?P=q)\s*\)""", re.IGNORECASE)
+_ICON_RELS = frozenset({"icon", "shortcut", "apple-touch-icon", "apple-touch-icon-precomposed",
+                        "mask-icon"})  # fmt: skip
 # bare URLs in text/plain; stops at whitespace and common closing punctuation
 TEXT_URL_RE = re.compile(r"https?://[^\s<>\"'()\[\]]+", re.IGNORECASE)
 _TRAILING_PUNCT = ".,;:!?"
@@ -38,7 +47,9 @@ class CidPart:
 @dataclass(frozen=True)
 class Embed:
     url: str
-    via: str  # img | source | background | style | stylesheet
+    # img | source | background | style | stylesheet | poster | input | icon;
+    # the issue stage adds css (an asset a stylesheet refers to)
+    via: str
     pixel: bool = False
 
 
@@ -162,6 +173,39 @@ def parse_srcset(value: str) -> list[str]:
     return urls
 
 
+def css_urls(css: str, base: str | None = None) -> tuple[list[str], list[str]]:
+    """``(imports, assets)``: the stylesheets ``css`` imports and the other
+    files it refers to (fonts, images), as absolute http(s) URLs.
+
+    Relative URLs are resolved against ``base``, the stylesheet's own URL. In
+    a message's HTML there is no base, so only absolute URLs count.
+    """
+    css = _CSS_COMMENT.sub("", css)
+    imports: list[str] = []
+    spans: list[tuple[int, int]] = []
+
+    def absolute(raw: str) -> str | None:
+        raw = raw.strip()
+        if not raw or raw.lower().startswith("data:"):
+            return None
+        url = urljoin(base, raw) if base else raw
+        return url if _is_http(url) else None
+
+    for m in _CSS_IMPORT.finditer(css):
+        spans.append(m.span())
+        url = absolute(m.group("u1") if m.group("u1") is not None else m.group("u2") or "")
+        if url:
+            imports.append(url)
+    assets: list[str] = []
+    for m in _CSS_URL.finditer(css):
+        if any(a <= m.start() < b for a, b in spans):
+            continue
+        url = absolute(m.group("u"))
+        if url:
+            assets.append(url)
+    return imports, assets
+
+
 def extract_embeds(html: str | None) -> list[Embed]:
     """Everything the HTML loads to render, in document order, deduplicated.
 
@@ -186,17 +230,30 @@ def extract_embeds(html: str | None) -> list[Embed]:
     for el in soup.find_all(background=True):
         assert isinstance(el, Tag)
         add(_attr(el, "background"), "background")
+    for el in soup.find_all("video"):
+        assert isinstance(el, Tag)
+        add(_attr(el, "poster"), "poster")
+    for el in soup.find_all("input"):
+        assert isinstance(el, Tag)
+        if _attr(el, "type").strip().lower() == "image":
+            add(_attr(el, "src"), "input")
     for el in soup.find_all(style=True):
         assert isinstance(el, Tag)
-        for m in CSS_URL_RE.finditer(_attr(el, "style")):
-            add(m.group(1), "style")
+        for url in css_urls(_attr(el, "style"))[1]:
+            add(url, "style")
     for el in soup.find_all("style"):
-        for m in CSS_URL_RE.finditer(el.get_text() or ""):
-            add(m.group(1), "style")
+        imports, assets = css_urls(el.get_text() or "")
+        for url in imports:
+            add(url, "stylesheet")
+        for url in assets:
+            add(url, "style")
     for el in soup.find_all("link"):
         assert isinstance(el, Tag)
-        if "stylesheet" in [r.lower() for r in el.get_attribute_list("rel") if r]:
+        rels = {r.lower() for r in el.get_attribute_list("rel") if r}
+        if "stylesheet" in rels:
             add(_attr(el, "href"), "stylesheet")
+        elif rels & _ICON_RELS:
+            add(_attr(el, "href"), "icon")
 
     seen: set[str] = set()
     out: list[Embed] = []

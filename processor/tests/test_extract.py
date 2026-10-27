@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from dea_capture.extract import (
+    css_urls,
     extract_embeds,
     extract_links,
     is_tracking_pixel,
@@ -30,6 +31,11 @@ def test_generic_embeds_cover_every_html_source() -> None:
         "https://www.example.com/img/banner.jpg": "style",
         "https://www.example.com/img/footer.png": "img",
         "https://fonts.example.com/css?family=Serif": "stylesheet",
+        "https://www.example.com/css/letter.css": "stylesheet",
+        "https://www.example.com/img/trailer-poster.jpg": "poster",
+        "https://www.example.com/img/go.png": "input",
+        "https://www.example.com/favicon.ico": "icon",
+        "https://www.example.com/touch.png": "icon",
     }
     assert list(msg.cid_parts) == ["logo@example.com"]
     assert msg.cid_parts["logo@example.com"].data.startswith(b"\x89PNG")
@@ -102,3 +108,33 @@ def test_html_only_message_has_no_text_links() -> None:
 )
 def test_parse_srcset(srcset: str, urls: list[str]) -> None:
     assert parse_srcset(srcset) == urls
+
+
+def test_commented_out_import_is_ignored() -> None:
+    embeds = {e.url for e in extract_embeds(parse(load("generic.eml")).html)}
+    assert "https://www.example.com/commented-out.css" not in embeds
+
+
+def test_css_urls_resolves_against_the_stylesheet() -> None:
+    css = """
+    /* url(https://x.example.com/commented.png) */
+    @import "https://a.example.com/a.css";
+    @import url('b.css') screen;
+    @font-face { src: url(f.woff2) format("woff2"), url("data:font/woff;base64,AA"); }
+    .x { background: url( 'img/bg.png' ) }
+    .y { background: url(/abs.png) }
+    """
+    imports, assets = css_urls(css, "https://cdn.example.com/css/main.css")
+    assert imports == ["https://a.example.com/a.css", "https://cdn.example.com/css/b.css"]
+    assert assets == [
+        "https://cdn.example.com/css/f.woff2",
+        "https://cdn.example.com/css/img/bg.png",
+        "https://cdn.example.com/abs.png",
+    ]
+
+
+def test_css_urls_without_a_base_keeps_only_absolute() -> None:
+    imports, assets = css_urls(
+        "@import 'rel.css'; .x{background:url(rel.png)} .y{background:url(https://abs.example.com/a.png)}"
+    )
+    assert (imports, assets) == ([], ["https://abs.example.com/a.png"])

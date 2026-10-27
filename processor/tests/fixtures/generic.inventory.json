@@ -6,8 +6,23 @@
       "pixel": false
     },
     {
+      "url": "https://www.example.com/img/trailer-poster.jpg",
+      "via": "poster",
+      "pixel": false
+    },
+    {
+      "url": "https://www.example.com/img/go.png",
+      "via": "input",
+      "pixel": false
+    },
+    {
       "url": "https://www.example.com/img/banner.jpg",
       "via": "style",
+      "pixel": false
+    },
+    {
+      "url": "https://www.example.com/css/letter.css",
+      "via": "stylesheet",
       "pixel": false
     },
     {
@@ -18,6 +33,16 @@
     {
       "url": "https://fonts.example.com/css?family=Serif",
       "via": "stylesheet",
+      "pixel": false
+    },
+    {
+      "url": "https://www.example.com/favicon.ico",
+      "via": "icon",
+      "pixel": false
+    },
+    {
+      "url": "https://www.example.com/touch.png",
+      "via": "icon",
       "pixel": false
     }
   ],

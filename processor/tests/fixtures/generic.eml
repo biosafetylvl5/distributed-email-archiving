@@ -23,12 +23,18 @@ Content-Type: text/html; charset=utf-8
 
 <html><head>
 <link rel="stylesheet" href="https://fonts.example.com/css?family=Serif">
-<style>@font-face{font-family:Serif;src:url('https://fonts.example.com/serif.woff2')}</style>
+<link rel="icon" href="https://www.example.com/favicon.ico">
+<link rel="apple-touch-icon" href="https://www.example.com/touch.png">
+<style>@import "https://www.example.com/css/letter.css";
+/* @import "https://www.example.com/commented-out.css"; */
+@font-face{font-family:Serif;src:url('https://fonts.example.com/serif.woff2')}</style>
 </head><body>
 <a id="top"></a>
 <img src="cid:logo@example.com" alt="Example Collective">
 <div style="background-image:url(https://www.example.com/img/banner.jpg)">
 <p><a href="https://www.example.com/files/zine-october.pdf">Our zine (PDF)</a></p>
+<video poster="https://www.example.com/img/trailer-poster.jpg" controls></video>
+<form><input type="image" src="https://www.example.com/img/go.png" alt="Go"></form>
 <p><a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ&amp;utm_source=letter">Watch</a></p>
 <p><a href="http://old.example.com/archive/2019/">An old page over http</a></p>
 <p><a href="https://www.example.com/search?s=archives&amp;utm_medium=email">Search results</a></p>

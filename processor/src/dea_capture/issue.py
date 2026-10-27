@@ -20,6 +20,11 @@ the message is inventoried again, embeds the old manifest already has as
 ``ok`` are carried over without a request, and only the rest are fetched.
 Bump the version whenever a change to extraction alters which URLs a
 message embeds.
+
+Stylesheets are read after they are stored: the fonts and images they refer
+to are fetched as ``css`` embeds, and their ``@import``s as further
+stylesheets, up to ``MAX_CSS_DEPTH`` deep and ``MAX_CSS_ASSETS`` per
+message. Past the limit they are recorded as ``deferred:budget``.
 """
 
 from __future__ import annotations
@@ -27,22 +32,27 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+from collections import deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Literal
 
 from . import __version__
-from .extract import parse
+from .extract import Embed, css_urls, parse
 from .fetch import FetchError, HostPacer, TooLarge, follow
 from .guard import ForbiddenFetch, GuardedFetcher
 from .inventory import Inventory, inventory
 from .store import Store, put_json
 
-Status = Literal["ok", "failed", "refused", "deferred:size"]
+Status = Literal["ok", "failed", "refused", "deferred:size", "deferred:budget"]
 
 # 2: srcset URLs keep their commas
-EXTRACT_VERSION = 2
+# 3: poster, input type=image, icon links, @import, and what stylesheets refer to
+EXTRACT_VERSION = 3
+MAX_CSS_DEPTH = 3
+MAX_CSS_ASSETS = 300
+_STYLESHEETS = frozenset({"stylesheet", "css-import"})
 
 
 def issue_prefix(sha: str) -> str:
@@ -66,6 +76,8 @@ class AssetRecord:
     http_status: int | None = None
     # redirects followed, when there were any
     chain: list[str] = field(default_factory=list)
+    # for css and css-import: the stylesheet that refers to it
+    found_in: str | None = None
     error: str | None = None
     fetched_at: str | None = None
 
@@ -161,13 +173,38 @@ def process_issue(
     fetcher = make_fetcher(inv)
     records: list[AssetRecord] = []
     reused = 0
-    for embed in inv.embeds:
-        if embed.url in reuse:
+    # (embed, the stylesheet it came from, stylesheet depth)
+    queue: deque[tuple[Embed, str | None, int]] = deque((e, None, 0) for e in inv.embeds)
+    seen = {e.url for e in inv.embeds}
+    from_css = 0
+    while queue:
+        embed, parent, depth = queue.popleft()
+        if parent is not None and from_css >= MAX_CSS_ASSETS:
+            rec = AssetRecord(
+                url=embed.url, via="", pixel=False, status="deferred:budget",
+                error=f"over {MAX_CSS_ASSETS} stylesheet assets",
+            )  # fmt: skip
+        elif embed.url in reuse:
             rec, reused = reuse[embed.url], reused + 1
         else:
             rec = fetch_embed(embed.url, fetcher, store, sha, pacer)
-        rec.via, rec.pixel = embed.via, embed.pixel
+        if parent is not None:
+            from_css += 1
+        rec.via, rec.pixel, rec.found_in = embed.via, embed.pixel, parent
         records.append(rec)
+        if embed.via not in _STYLESHEETS or rec.status != "ok" or rec.key is None:
+            continue
+        if depth >= MAX_CSS_DEPTH:
+            continue
+        body = store.get(rec.key)
+        if body is None:
+            continue
+        base = rec.chain[-1] if rec.chain else rec.url
+        imports, assets = css_urls(body.decode("utf-8", errors="replace"), base)
+        for url, via in [(u, "css-import") for u in imports] + [(u, "css") for u in assets]:
+            if url not in seen:
+                seen.add(url)
+                queue.append((Embed(url, via), embed.url, depth + 1))
     cid_parts = parse(raw).cid_parts
     for cid, part in cid_parts.items():
         key, digest = _store_body(store, sha, part.data, part.content_type, part.filename or "")
@@ -179,6 +216,8 @@ def process_issue(
         )  # fmt: skip
 
     counts: dict[str, int] = {"embeds": len(inv.embeds), "cid": len(cid_parts)}
+    if from_css:
+        counts["from_css"] = from_css
     for rec in records:
         counts[rec.status] = counts.get(rec.status, 0) + 1
     if reused:
