@@ -61,12 +61,18 @@ jobs:
           load: true
           tags: dea-capture:smoke
           cache-from: type=gha
-      # as the pod runs it: read-only root, uid 1000, only /tmp writable
+      # as the pod runs it: read-only root, uid 1000, only /tmp writable. The
+      # output is also an annotation, which can be read without a login.
       - working-directory: .
-        run: >-
-          docker run --rm --read-only --tmpfs /tmp:exec --user 1000:1000
-          -v "$PWD/processor/deploy/smoke-page.py:/smoke.py:ro"
-          dea-capture:smoke python3 /smoke.py
+        run: |
+          set -o pipefail
+          status=0
+          docker run --rm --read-only --tmpfs /tmp:exec --user 1000:1000 \
+            -v "$PWD/processor/deploy/smoke-page.py:/smoke.py:ro" \
+            dea-capture:smoke python3 /smoke.py 2>&1 | tee smoke.out || status=$?
+          body=$(tail -c 6000 smoke.out | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+          if [ "$status" -eq 0 ]; then echo "::notice title=smoke-page::$body"; else echo "::error title=smoke-page::$body"; fi
+          exit "$status"
       - id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:

@@ -25,6 +25,19 @@ from dea_capture.proxy import GuardProxy
 hits: list[str] = []
 
 
+def log_tail(workdir: Path) -> None:
+    """The crawler's warnings and errors, and its last lines (smoke URLs only)."""
+    try:
+        lines = (workdir / "crawl.log").read_text(errors="replace").splitlines()
+    except OSError as exc:
+        print("no crawl.log:", exc)
+        return
+    keep = [ln for ln in lines if '"logLevel":"error"' in ln or '"logLevel":"fatal"' in ln
+            or '"logLevel":"warn"' in ln]  # fmt: skip
+    for ln in [*keep[-15:], "--- last lines", *lines[-10:]]:
+        print("  crawl.log:", ln[:400])
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         hits.append(self.path)
@@ -39,14 +52,22 @@ local_url = f"http://127.0.0.1:{local.server_address[1]}/"
 
 with tempfile.TemporaryDirectory() as tmp:
     c = page.run_crawler(local_url, Path(tmp), GuardProxy(), "dea-capture-smoke")
-loopback = {"exit": c.exit_code, "hits": len(hits), "refused": dict(c.stats.refused)}
-print("loopback", json.dumps(loopback))
+    loopback = {"exit": c.exit_code, "hits": len(hits), "refused": dict(c.stats.refused)}
+    print("loopback", json.dumps(loopback))
+    if hits or not c.stats.refused.get("127.0.0.1"):
+        log_tail(Path(tmp))
 assert not hits, "the browser reached loopback"
 assert c.stats.refused.get("127.0.0.1"), "the proxy didn't see the loopback request"
 
 
 def crawler(url: str, workdir: Path) -> page.Crawl:
-    return page.run_crawler(url, workdir, GuardProxy(), "dea-capture-smoke")
+    c = page.run_crawler(url, workdir, GuardProxy(), "dea-capture-smoke")
+    seen = {"exit": c.exit_code, "proxy": c.stats.to_json(), "page": bool(c.page),
+            "wacz": bool(c.wacz)}  # fmt: skip
+    print("example.com crawl", json.dumps(seen))
+    if not c.page:
+        log_tail(workdir)
+    return c
 
 
 got = page.crawl_page("https://example.com/", crawler)
