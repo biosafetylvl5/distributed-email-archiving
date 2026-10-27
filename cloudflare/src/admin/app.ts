@@ -309,7 +309,7 @@ function urlTable(u: UrlCaptures): Html {
 ${URL_KINDS.map(
     (k) => html`<tr><th>${URL_KIND_LABELS[k]}</th>${cols.map((s) => html`<td>${u.byKind[k][s] || html`<span class="muted">0</span>`}</td>`)}</tr>`,
   )}</table>
-<span class="muted">Page and media capture aren't running yet; those URLs wait in their queues.</span>`;
+<span class="muted">Media capture isn't running yet; those URLs wait in their queue. Pages are captured one at a time.</span>`;
 }
 
 const CAPTURE_STATES = ["all", "partial", "pending", "done"] as const;
