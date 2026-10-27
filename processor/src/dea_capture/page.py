@@ -17,13 +17,16 @@ temporary directory and never printed.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import gzip
 import hashlib
 import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
+import time
 import zipfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -76,32 +79,70 @@ def crawl_args(url: str, workdir: Path, proxy_port: int, user_agent_suffix: str)
     ]  # fmt: skip
 
 
-def _crawler_env() -> dict[str, str]:
-    return {k: v for k, v in os.environ.items() if not k.startswith(_SECRET_ENV)}
+def _crawler_env(workdir: Path) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if not k.startswith(_SECRET_ENV)}
+    # The image detaches the crawler's redis and browser into sessions of
+    # their own, so they outlive it; a later crawl would then find the old
+    # redis on its fixed port, state and all. Keep them in our process group,
+    # where killpg ends them. Redis also saves to, and reloads from, its cwd,
+    # which is the temp dir: make that this crawl's directory.
+    env["DETACHED_CHILD_PROC"] = "0"
+    env["TMPDIR"] = str(workdir)
+    return env
+
+
+def _become_subreaper() -> None:
+    """Adopt the crawler's orphans, so they're reaped here, not left as
+    zombies under PID 1 (courier, which doesn't reap them)."""
+    if sys.platform == "linux":
+        with contextlib.suppress(OSError, AttributeError):
+            ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER
+
+
+def _reap() -> None:
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            return
+
+
+def _end_group(pgid: int, grace: float = 10.0) -> None:
+    """TERM, then KILL, everything in the crawler's process group, until none is left."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            _reap()
+            try:
+                os.killpg(pgid, 0)
+            except (ProcessLookupError, PermissionError):
+                return
+            time.sleep(0.1)
 
 
 def run_crawler(url: str, workdir: Path, proxy: GuardProxy, user_agent_suffix: str) -> Crawl:
     """Run browsertrix-crawler on ``url`` behind ``proxy`` (started here)."""
+    _become_subreaper()
     port = proxy.start()
     try:
         with (workdir / "crawl.log").open("wb") as log:
             proc = subprocess.Popen(
                 crawl_args(url, workdir, port, user_agent_suffix),
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                cwd=workdir, env=_crawler_env(), start_new_session=True,
+                cwd=workdir, env=_crawler_env(workdir), start_new_session=True,
             )  # fmt: skip
             try:
                 code: int | None = proc.wait(KILL_AFTER)
             except subprocess.TimeoutExpired:
                 code = None
-            # the crawler leaves its browser and redis behind if it dies
-            for sig in (signal.SIGTERM, signal.SIGKILL):
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.killpg(proc.pid, sig)
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    proc.wait(10)
-                    if sig == signal.SIGTERM:
-                        break
+            # the crawler leaves its redis and browser running when it exits
+            _end_group(proc.pid)
     finally:
         proxy.stop()
     wacz = workdir / "collections" / COLLECTION / f"{COLLECTION}.wacz"

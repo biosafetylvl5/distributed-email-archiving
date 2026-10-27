@@ -151,9 +151,13 @@ def test_crawl_page_refused(tmp_path: Path) -> None:
 FAKE_CRAWL = r"""import json, os, sys, time, zipfile
 args = sys.argv[1:]
 cwd = args[args.index("--cwd") + 1]
-open(os.path.join(cwd, "env.json"), "w").write(json.dumps(sorted(os.environ)))
+open(os.path.join(cwd, "env.json"), "w").write(json.dumps(dict(os.environ)))
 if os.environ.get("FAKE_CRAWL_HANG"):
     time.sleep(60)
+# like the crawler's redis: a child left running after the crawler exits
+import subprocess
+leftover = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+open(os.path.join(cwd, "leftover.pid"), "w").write(str(leftover.pid))
 coll = os.path.join(cwd, "collections", "page")
 os.makedirs(coll)
 with zipfile.ZipFile(os.path.join(coll, "page.wacz"), "w") as z:
@@ -186,9 +190,17 @@ def test_run_crawler(fake_crawl_bin: Path, capfd: pytest.CaptureFixture[str]) ->
     assert c.page is not None and c.page["status"] == 200
     assert c.wacz is not None and c.wacz.is_file()
     # no credentials for the crawler, and its log (URLs) never reaches stdout
-    assert "AWS_SECRET_ACCESS_KEY" not in json.loads((work / "env.json").read_text())
+    env = json.loads((work / "env.json").read_text())
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    # its redis and browser stay killable, and keep their files in `work`
+    assert env["DETACHED_CHILD_PROC"] == "0"
+    assert env["TMPDIR"] == str(work)
     assert URL not in capfd.readouterr().out
     assert URL in (work / "crawl.log").read_text()
+    # the child it left behind was ended with it
+    leftover = int((work / "leftover.pid").read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(leftover, 0)
 
 
 def test_run_crawler_kills_a_hung_crawl(
