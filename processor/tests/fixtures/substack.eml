@@ -21,7 +21,7 @@ Content-Type: text/html; charset=utf-8
 <body>
 <img src="https://eotrx.substackcdn.com/open?token=PIXELTOKEN&amp;ref=1" alt="" style="display:none">
 <a href="https://substack.com/redirect/2/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlIjoiaHR0cHM6Ly9leGFtcGxlLnN1YnN0YWNrLmNvbS9wL2hlbGxvLXdvcmxkP3V0bV9zb3VyY2U9c3Vic3RhY2smdXRtX21lZGl1bT1lbWFpbCZ1dG1fY29udGVudD1zaGFyZSIsInAiOjEwMDEsInMiOjIwMDIsImYiOnRydWUsInUiOjMwMDMsImlhdCI6MTc2MTUwMDAwMCwiZXhwIjoxNzY0MDkyMDAwLCJpc3MiOiJwdWItMjAwMiIsInN1YiI6ImxpbmstcmVkaXJlY3QifQ.c2lnbmF0dXJl?j=eyJ1IjozMDAzfQ">Hello world</a>
-<img src="https://substackcdn.com/image/fetch/w_600/photo.jpg" srcset="https://substackcdn.com/image/fetch/w_600/photo.jpg 1x, https://substackcdn.com/image/fetch/w_1200/photo.jpg 2x" width="600" height="400" alt="A photo">
+<img src="https://substackcdn.com/image/fetch/w_600,c_limit,f_auto,q_auto:good/photo.jpg" srcset="https://substackcdn.com/image/fetch/w_600,c_limit,f_auto,q_auto:good/photo.jpg 1x,https://substackcdn.com/image/fetch/w_1200,c_limit,f_auto,q_auto:good/photo.jpg 2x" width="600" height="400" alt="A photo">
 <p>Read <a href="https://substack.com/redirect/6f1c2d3e-0000-4000-8000-000000000001?j=eyJ1IjozMDAzfQ">an article I liked</a>
 and <a href="https://substack.com/redirect/2/eyJlIjoiaHR0cHM6Ly93d3cuZXhhbXBsZS5vcmcvbmV3cy9vY3RvYmVyLWZlYXR1cmUiLCJwIjoxMDAxLCJzIjoyMDAyLCJmIjp0cnVlLCJ1IjozMDAzLCJpYXQiOjE3NjE1MDAwMDAsImV4cCI6MTc2NDA5MjAwMCwiaXNzIjoicHViLTIwMDIiLCJzdWIiOiJsaW5rLXJlZGlyZWN0In0.c2lnbmF0dXJlLXR3by1wYXJ0LWZvcm0?utm_source=substack&amp;utm_medium=email&amp;utm_content=share">a feature elsewhere</a>
 and <a href="https://email.mg1.substack.com/c/eJxOpaqueClickWrapper">a wrapped link</a>.</p>

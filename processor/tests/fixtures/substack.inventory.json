@@ -6,12 +6,12 @@
       "pixel": true
     },
     {
-      "url": "https://substackcdn.com/image/fetch/w_600/photo.jpg",
+      "url": "https://substackcdn.com/image/fetch/w_600,c_limit,f_auto,q_auto:good/photo.jpg",
       "via": "img",
       "pixel": false
     },
     {
-      "url": "https://substackcdn.com/image/fetch/w_1200/photo.jpg",
+      "url": "https://substackcdn.com/image/fetch/w_1200,c_limit,f_auto,q_auto:good/photo.jpg",
       "via": "img",
       "pixel": false
     },

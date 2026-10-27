@@ -11,8 +11,8 @@ import pytest
 from dea_capture.fetch import HostPacer, TooLarge
 from dea_capture.guard import GuardedFetcher, IPAddress, Response
 from dea_capture.inventory import Inventory, inventory
-from dea_capture.issue import manifest_key, process_issue
-from dea_capture.store import LocalStore
+from dea_capture.issue import EXTRACT_VERSION, manifest_key, process_issue
+from dea_capture.store import LocalStore, put_json
 
 from .conftest import EML_FIXTURES, FORBIDDEN_MARKERS, fake_resolver, load
 
@@ -137,3 +137,36 @@ def test_stdout_line_has_no_urls(tmp_path: Path) -> None:
     result = _run(load("substack.eml"), LocalStore(tmp_path), FakeCDN())
     line = result.line()  # type: ignore[attr-defined]
     assert line.startswith("ISSUE ") and "http" not in line
+
+
+def test_older_manifest_is_redone_without_refetching(tmp_path: Path) -> None:
+    raw = load("substack.eml")
+    store = LocalStore(tmp_path)
+    _run(raw, store, FakeCDN())
+    m = _manifest(store, raw)
+    big = "https://substackcdn.com/image/fetch/w_1200,c_limit,f_auto,q_auto:good/photo.jpg"
+    # what an EXTRACT_VERSION 1 run left: the srcset URL cut at its first comma
+    m["extract_version"] = 1
+    for a in m["assets"]:
+        if a["url"] == big:
+            a.update(url="https://substackcdn.com/image/fetch/w_1200", status="failed")
+    put_json(store, manifest_key(m["sha256"]), m)
+
+    again = FakeCDN()
+    result = _run(raw, store, again)
+    assert again.requested == [big]
+    assert "reused=" in result.line()  # type: ignore[attr-defined]
+    m2 = _manifest(store, raw)
+    assert m2["extract_version"] == EXTRACT_VERSION
+    assert {a["url"] for a in m2["assets"]} == {a["url"] for a in _manifest_fresh(raw, tmp_path)}
+    assert all(a["status"] == "ok" for a in m2["assets"])
+    # and now it is done
+    third = FakeCDN()
+    _run(raw, store, third)
+    assert third.requested == []
+
+
+def _manifest_fresh(raw: bytes, tmp_path: Path) -> list[dict]:  # type: ignore[type-arg]
+    store = LocalStore(tmp_path / "fresh")
+    _run(raw, store, FakeCDN())
+    return _manifest(store, raw)["assets"]  # type: ignore[no-any-return]

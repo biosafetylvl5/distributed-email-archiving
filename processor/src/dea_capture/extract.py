@@ -131,6 +131,37 @@ def is_tracking_pixel(url: str, el: Tag | None = None) -> bool:
     return bool(_PIXEL_PATHS.search(parts.path))
 
 
+def parse_srcset(value: str) -> list[str]:
+    """The URLs in a ``srcset``, as the HTML spec parses it.
+
+    A URL runs to the next whitespace, so commas inside it are kept: image
+    CDNs put them in paths (``/image/fetch/w_424,c_limit,f_auto/...``). Only
+    commas at the end of a URL, or after its descriptors, separate candidates.
+    """
+    urls: list[str] = []
+    pos, n = 0, len(value)
+    while pos < n:
+        while pos < n and (value[pos].isspace() or value[pos] == ","):
+            pos += 1
+        start = pos
+        while pos < n and not value[pos].isspace():
+            pos += 1
+        url = value[start:pos]
+        if not url:
+            break
+        if url.endswith(","):
+            url = url.rstrip(",")
+        else:
+            # skip the descriptors, up to the comma that ends this candidate
+            depth = 0
+            while pos < n and not (value[pos] == "," and depth == 0):
+                depth += {"(": 1, ")": -1}.get(value[pos], 0)
+                pos += 1
+        if url:
+            urls.append(url)
+    return urls
+
+
 def extract_embeds(html: str | None) -> list[Embed]:
     """Everything the HTML loads to render, in document order, deduplicated.
 
@@ -150,10 +181,8 @@ def extract_embeds(html: str | None) -> list[Embed]:
     for el in soup.find_all(["img", "source"]):
         assert isinstance(el, Tag)
         add(_attr(el, "src"), el.name, el)
-        for candidate in _attr(el, "srcset").split(","):
-            bits = candidate.strip().split()
-            if bits:
-                add(bits[0], el.name)
+        for url in parse_srcset(_attr(el, "srcset")):
+            add(url, el.name)
     for el in soup.find_all(background=True):
         assert isinstance(el, Tag)
         add(_attr(el, "background"), "background")

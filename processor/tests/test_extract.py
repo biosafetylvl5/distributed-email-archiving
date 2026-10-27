@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import pytest
+
 from dea_capture.extract import (
     extract_embeds,
     extract_links,
     is_tracking_pixel,
     parse,
     parse_list_unsubscribe,
+    parse_srcset,
 )
 
 from .conftest import load
@@ -34,7 +37,10 @@ def test_generic_embeds_cover_every_html_source() -> None:
 
 def test_srcset_background_and_pixels() -> None:
     sub = extract_embeds(parse(load("substack.eml")).html)
-    assert "https://substackcdn.com/image/fetch/w_1200/photo.jpg" in {e.url for e in sub}
+    # srcset URLs keep their commas
+    big = "https://substackcdn.com/image/fetch/w_1200,c_limit,f_auto,q_auto:good/photo.jpg"
+    assert big in {e.url for e in sub}
+    assert not any(e.url.endswith("/fetch/w_1200") for e in sub)
     pixels = [e.url for e in sub if e.pixel]
     assert pixels == ["https://eotrx.substackcdn.com/open?token=PIXELTOKEN&ref=1"]
 
@@ -72,3 +78,27 @@ def test_html_only_message_has_no_text_links() -> None:
     msg = parse(load("mailchimp.eml"))
     assert msg.text is None
     assert all(link.via == "html" for link in extract_links(msg))
+
+
+@pytest.mark.parametrize(
+    ("srcset", "urls"),
+    [
+        ("a.png 1x, b.png 2x", ["a.png", "b.png"]),
+        # no whitespace after the comma: one URL, per the spec
+        ("a.png,b.png", ["a.png,b.png"]),
+        ("a.png, b.png", ["a.png", "b.png"]),
+        (
+            "https://cdn.example.com/f/w_424,c_limit,f_auto/x.jpg 424w,"
+            "https://cdn.example.com/f/w_848,c_limit,f_auto/x.jpg 848w",
+            [
+                "https://cdn.example.com/f/w_424,c_limit,f_auto/x.jpg",
+                "https://cdn.example.com/f/w_848,c_limit,f_auto/x.jpg",
+            ],
+        ),
+        ("  a.png  ,  , b.png 2x  ", ["a.png", "b.png"]),
+        ("a.png 1x (junk, more), b.png", ["a.png", "b.png"]),
+        ("", []),
+    ],
+)
+def test_parse_srcset(srcset: str, urls: list[str]) -> None:
+    assert parse_srcset(srcset) == urls

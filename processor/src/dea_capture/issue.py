@@ -14,11 +14,18 @@ Everything goes under ``issues/<sha256 of the .eml>/``:
 
 Each embed is fetched once. Failures are recorded with their reason; the
 retry schedule comes with the capture stages.
+
+A manifest written by an older ``EXTRACT_VERSION`` is redone incrementally:
+the message is inventoried again, embeds the old manifest already has as
+``ok`` are carried over without a request, and only the rest are fetched.
+Bump the version whenever a change to extraction alters which URLs a
+message embeds.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -33,6 +40,9 @@ from .inventory import Inventory, inventory
 from .store import Store, put_json
 
 Status = Literal["ok", "failed", "refused", "deferred:size"]
+
+# 2: srcset URLs keep their commas
+EXTRACT_VERSION = 2
 
 
 def issue_prefix(sha: str) -> str:
@@ -134,16 +144,28 @@ def process_issue(
     pacer: HostPacer | None = None,
 ) -> IssueResult:
     sha = hashlib.sha256(raw).hexdigest()
-    if not force and store.exists(manifest_key(sha)):
-        return IssueResult(sha, skipped=True, counts={})
+    reuse: dict[str, AssetRecord] = {}
+    if not force:
+        previous = store.get(manifest_key(sha))
+        if previous is not None:
+            old = json.loads(previous)
+            if old.get("extract_version", 1) >= EXTRACT_VERSION:
+                return IssueResult(sha, skipped=True, counts={})
+            for a in old.get("assets", []):
+                if a.get("status") == "ok" and a.get("via") != "cid":
+                    reuse[a["url"]] = AssetRecord(**a)
     pacer = pacer or HostPacer()
     inv = inventory(raw)
     put_json(store, f"{issue_prefix(sha)}links.json", {"source": source, **inv.to_json()})
 
     fetcher = make_fetcher(inv)
     records: list[AssetRecord] = []
+    reused = 0
     for embed in inv.embeds:
-        rec = fetch_embed(embed.url, fetcher, store, sha, pacer)
+        if embed.url in reuse:
+            rec, reused = reuse[embed.url], reused + 1
+        else:
+            rec = fetch_embed(embed.url, fetcher, store, sha, pacer)
         rec.via, rec.pixel = embed.via, embed.pixel
         records.append(rec)
     cid_parts = parse(raw).cid_parts
@@ -159,6 +181,8 @@ def process_issue(
     counts: dict[str, int] = {"embeds": len(inv.embeds), "cid": len(cid_parts)}
     for rec in records:
         counts[rec.status] = counts.get(rec.status, 0) + 1
+    if reused:
+        counts["reused"] = reused
     put_json(
         store,
         manifest_key(sha),
@@ -166,6 +190,7 @@ def process_issue(
             "source": source,
             "sha256": sha,
             "generator": f"dea-capture {__version__}",
+            "extract_version": EXTRACT_VERSION,
             "completed_at": _now(),
             "counts": counts,
             "assets": [asdict(r) for r in records],

@@ -68,6 +68,8 @@ that request is made.
 - `assets/manifest.json`: one record per embed, with its status (`ok`,
   `failed`, `refused`, `deferred:size`), redirect chain, size and type. It
   is written last, so a message with a manifest is done and is skipped.
+  A manifest from an older `EXTRACT_VERSION` is redone incrementally: embeds
+  it already stored are kept, and only new URLs are fetched.
 
 Requests to one host are at least a second apart. Bodies over 50 MiB are
 deferred, not fetched. `DEA_EXTRA_BLOCKED` (comma-separated CIDRs) adds
