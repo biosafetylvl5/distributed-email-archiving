@@ -1,0 +1,63 @@
+{
+  "embeds": [
+    {
+      "url": "https://content.app-us1.com/abc/2026/10/26/products.png",
+      "via": "img",
+      "pixel": false
+    },
+    {
+      "url": "https://example.activehosted.com/lto.php?nl=1&c=2&m=3&s=bb22&l=open",
+      "via": "img",
+      "pixel": true
+    },
+    {
+      "url": "https://content.app-us1.com/abc/2026/10/26/bg.jpg",
+      "via": "background",
+      "pixel": false
+    }
+  ],
+  "cid_parts": [],
+  "links": [
+    {
+      "href": "https://example.lt.acemlna.com/Prod/link-tracker?redirectUrl=aHR0cHM6Ly9leGFtcGxl&sig=abc&iat=1&a=1&account=example&email=bb22",
+      "text": "Shop new arrivals",
+      "link_class": "tracking-redirect",
+      "decision": "resolve",
+      "reason": "activecampaign redirect, opaque",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": "https://example.lt.acemlna.com/Prod/link-tracker?redirectUrl=aHR0cHM6Ly9leGFtcGxl&sig=abc&iat=1&a=1&account=example&email=bb22"
+    },
+    {
+      "href": "https://example.activehosted.com/lt.php?x=OpaqueTrackerValue",
+      "text": "See the lookbook",
+      "link_class": "tracking-redirect",
+      "decision": "resolve",
+      "reason": "activecampaign redirect, opaque",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": "https://example.activehosted.com/lt.php?x=OpaqueTrackerValue"
+    },
+    {
+      "href": "https://example.activehosted.com/proc.php?nl=1&c=2&m=3&s=FORBIDDEN-unsub&act=unsub",
+      "text": "Click here",
+      "link_class": "unsubscribe",
+      "decision": "skip",
+      "reason": "url looks like unsubscribe or preferences",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": null
+    },
+    {
+      "href": "https://example.activehosted.com/proc.php?nl=1&c=2&m=3&s=FORBIDDEN-prefs&act=prefs",
+      "text": "Manage your preferences",
+      "link_class": "unsubscribe",
+      "decision": "skip",
+      "reason": "url looks like unsubscribe or preferences",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": null
+    }
+  ],
+  "list_unsubscribe": []
+}

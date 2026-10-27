@@ -11,5 +11,12 @@ node_modules/
 *.tfstate.*
 *.tfvars
 
+# python
+__pycache__/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
 # export-tags.sh output (user names, sender domains)
 tags.json

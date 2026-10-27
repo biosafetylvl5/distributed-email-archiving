@@ -3,8 +3,11 @@
 Archives email newsletters as raw `.eml` plus a browsable HTML copy with remote dependencies.
 
 **Status:** this repo currently contains only the Cloudflare edge adapter
-(Email Routing + ingest Worker + R2/KV via Terraform), its admin scripts, and an admin dashboard.
-Everything after `S3 incoming/` below is the goal architecture and not yet published.
+(Email Routing + ingest Worker + R2/KV via Terraform), its admin scripts, and an admin dashboard,
+plus the first piece of the processor: [`processor/`](processor/README.md) (`dea-capture`), which
+works out which linked and embedded content to archive without acting as the subscriber.
+It doesn't fetch anything yet. Everything else after `S3 incoming/` below is the goal
+architecture and not yet published.
 
 Goal architecture:
 

@@ -1,0 +1,74 @@
+from __future__ import annotations
+
+from dea_capture.extract import (
+    extract_embeds,
+    extract_links,
+    is_tracking_pixel,
+    parse,
+    parse_list_unsubscribe,
+)
+
+from .conftest import load
+
+
+def test_list_unsubscribe_header() -> None:
+    assert parse_list_unsubscribe("<https://a.example/u>, <mailto:u@a.example>") == (
+        "https://a.example/u",
+        "mailto:u@a.example",
+    )
+    assert parse_list_unsubscribe(None) == ()
+
+
+def test_generic_embeds_cover_every_html_source() -> None:
+    msg = parse(load("generic.eml"))
+    urls = {e.url: e.via for e in extract_embeds(msg.html)}
+    assert urls == {
+        "https://fonts.example.com/serif.woff2": "style",
+        "https://www.example.com/img/banner.jpg": "style",
+        "https://www.example.com/img/footer.png": "img",
+        "https://fonts.example.com/css?family=Serif": "stylesheet",
+    }
+    assert list(msg.cid_parts) == ["logo@example.com"]
+    assert msg.cid_parts["logo@example.com"].data.startswith(b"\x89PNG")
+
+
+def test_srcset_background_and_pixels() -> None:
+    sub = extract_embeds(parse(load("substack.eml")).html)
+    assert "https://substackcdn.com/image/fetch/w_1200/photo.jpg" in {e.url for e in sub}
+    pixels = [e.url for e in sub if e.pixel]
+    assert pixels == ["https://eotrx.substackcdn.com/open?token=PIXELTOKEN&ref=1"]
+
+    ac = extract_embeds(parse(load("activecampaign.eml")).html)
+    assert ("https://content.app-us1.com/abc/2026/10/26/bg.jpg", "background") in {
+        (e.url, e.via) for e in ac
+    }
+    assert [e.pixel for e in ac] == [False, True, False]
+
+    mc = extract_embeds(parse(load("mailchimp.eml")).html)
+    assert [e.pixel for e in mc] == [False, True]
+
+
+def test_pixel_by_dimensions_only_for_images() -> None:
+    assert not is_tracking_pixel("https://cdn.example.com/a.png")
+    assert is_tracking_pixel("https://x.example.com/track/open.php?u=1")
+
+
+def test_links_keep_order_text_and_text_part_extras() -> None:
+    links = extract_links(parse(load("generic.eml")))
+    hrefs = [link.href for link in links]
+    assert hrefs[0] == "https://www.example.com/files/zine-october.pdf"
+    assert "#top" in hrefs and "tel:+15555550100" in hrefs
+    # the empty <a id="top"> has no href and is not a link
+    assert all(h for h in hrefs)
+    by_href = {link.href: link for link in links}
+    assert by_href["https://www.example.com/"].text == "[image: Home]"
+    extra = [link for link in links if link.via == "text"]
+    # trailing punctuation is trimmed; URLs already in the HTML aren't repeated
+    assert [link.href for link in extra] == ["https://text-only.example.com/notes?ref=letter"]
+    assert [link.position for link in links] == list(range(len(links)))
+
+
+def test_html_only_message_has_no_text_links() -> None:
+    msg = parse(load("mailchimp.eml"))
+    assert msg.text is None
+    assert all(link.via == "html" for link in extract_links(msg))

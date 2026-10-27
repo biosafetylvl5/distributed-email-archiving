@@ -1,0 +1,64 @@
+From: Example Collective <letters@example.com>
+To: reader@example.org
+Subject: Monthly letter
+Date: Sun, 26 Oct 2026 12:00:00 +0000
+Message-ID: <fixture-generic@example.org>
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="r1"
+
+--r1
+Content-Type: multipart/alternative; boundary="a1"
+
+--a1
+Content-Type: text/plain; charset=utf-8
+
+Monthly letter.
+
+Our zine (PDF): https://www.example.com/files/zine-october.pdf
+Only in the text part: https://text-only.example.com/notes?ref=letter.
+Watch: https://www.youtube.com/watch?v=dQw4w9WgXcQ&utm_source=letter
+
+--a1
+Content-Type: text/html; charset=utf-8
+
+<html><head>
+<link rel="stylesheet" href="https://fonts.example.com/css?family=Serif">
+<style>@font-face{font-family:Serif;src:url('https://fonts.example.com/serif.woff2')}</style>
+</head><body>
+<a id="top"></a>
+<img src="cid:logo@example.com" alt="Example Collective">
+<div style="background-image:url(https://www.example.com/img/banner.jpg)">
+<p><a href="https://www.example.com/files/zine-october.pdf">Our zine (PDF)</a></p>
+<p><a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ&amp;utm_source=letter">Watch</a></p>
+<p><a href="http://old.example.com/archive/2019/">An old page over http</a></p>
+<p><a href="https://www.example.com/search?s=archives&amp;utm_medium=email">Search results</a></p>
+<p><a href="https://WWW.Example.com:443/About#team">About us</a></p>
+<p><a href="https://partner.example.com/report?access_token=SECRET-AT&amp;id=7">Partner report</a></p>
+<p><a href="https://www.example.com/community/vote/12?FORBIDDEN=vote">Vote</a>
+<a href="https://www.example.com/poll?FORBIDDEN=poll&amp;answer=yes">Yes</a></p>
+<p><a href="https://www.example.com/newsletter/confirm?code=FORBIDDEN-confirm">Confirm</a></p>
+<p><a href="https://www.example.com/unsubscribe-from-the-news-cycle">A post about unsubscribing from the news cycle</a></p>
+<p><a href="https://click.example.com/abc123">Tracked by a generic click host</a></p>
+<p><a href="http://intranet.example.com/admin">Internal link that resolves privately</a></p>
+<p><a href="http://192.168.1.1/">Router</a>
+<a href="http://[::1]/">Loopback</a>
+<a href="http://169.254.169.254/latest/meta-data/">Metadata</a></p>
+<p><a href="https://user:pw@www.example.com/private">Credentials in URL</a></p>
+<p><a href="mailto:letters@example.com?subject=FORBIDDEN">Write to us</a>
+<a href="tel:+15555550100">Call</a>
+<a href="javascript:alert('FORBIDDEN')">Script</a>
+<a href="#top">Back to top</a></p>
+<p><a href="https://www.example.com/"><img src="https://www.example.com/img/footer.png" alt="Home"></a></p>
+</div>
+</body></html>
+
+--a1--
+
+--r1
+Content-Type: image/png
+Content-ID: <logo@example.com>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==
+
+--r1--

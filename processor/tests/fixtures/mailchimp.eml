@@ -1,0 +1,24 @@
+From: Example Org <news@example.org>
+To: reader@example.org
+Subject: October update
+Date: Sun, 26 Oct 2026 12:00:00 +0000
+Message-ID: <fixture-mailchimp@example.org>
+List-Unsubscribe: <https://example.us1.list-manage.com/unsubscribe?u=FORBIDDEN-lu&id=aa11&e=bb22&c=cc33>, <mailto:unsubscribe-mc.us1_FORBIDDEN@inbound.mailchimp.com>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><body>
+<a href="https://mailchi.mp/example/october-update?e=bb22">View this email in your browser</a>
+<img src="https://mcusercontent.com/abc/images/logo.png" width="200" height="80" alt="Example Org">
+<p>Our <a href="https://example.us1.list-manage.com/track/click?u=aa11&amp;id=dd44&amp;e=bb22">annual report</a> is out,
+and <a href="https://www.example.org/news/october?utm_source=newsletter&amp;utm_medium=email&amp;utm_campaign=oct&amp;mc_cid=cc33&amp;mc_eid=bb22">here is the news</a>.</p>
+<p><a href="https://www.example.org/events/42/rsvp?FORBIDDEN=rsvp">RSVP</a></p>
+<p><a href="https://example.us1.list-manage.com/subscribe/confirm?u=aa11&amp;id=ee55&amp;e=FORBIDDEN-confirm">Confirm subscription</a></p>
+<p class="footer">
+<a href="https://example.us1.list-manage.com/vcard?u=aa11&amp;id=ee55">Add us to your address book</a>
+<a href="https://us1.forward-to-friend.com/forward?u=aa11&amp;id=dd44&amp;e=bb22">Forward</a>
+<a href="https://example.us1.list-manage.com/profile?u=aa11&amp;id=ee55&amp;e=FORBIDDEN-profile">update your preferences</a>
+or <a href="https://example.us1.list-manage.com/unsubscribe?u=aa11&amp;id=ee55&amp;e=FORBIDDEN-unsub&amp;c=cc33">unsubscribe from this list</a>.
+</p>
+<img src="https://example.us1.list-manage.com/track/open.php?u=aa11&amp;id=cc33&amp;e=bb22" height="1" width="1" alt="">
+</body></html>

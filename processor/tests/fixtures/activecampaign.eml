@@ -1,0 +1,18 @@
+From: Example Shop <hello@example.net>
+To: reader@example.org
+Subject: New arrivals
+Date: Sun, 26 Oct 2026 12:00:00 +0000
+Message-ID: <fixture-activecampaign@example.org>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><body>
+<table background="https://content.app-us1.com/abc/2026/10/26/bg.jpg"><tr><td>
+<img src="https://content.app-us1.com/abc/2026/10/26/products.png" width="600" alt="Products">
+<p><a href="https://example.lt.acemlna.com/Prod/link-tracker?redirectUrl=aHR0cHM6Ly9leGFtcGxl&amp;sig=abc&amp;iat=1&amp;a=1&amp;account=example&amp;email=bb22">Shop new arrivals</a></p>
+<p><a href="https://example.activehosted.com/lt.php?x=OpaqueTrackerValue">See the lookbook</a></p>
+</td></tr></table>
+<p><a href="https://example.activehosted.com/proc.php?nl=1&amp;c=2&amp;m=3&amp;s=FORBIDDEN-unsub&amp;act=unsub">Click here</a> to leave the list.</p>
+<p><a href="https://example.activehosted.com/proc.php?nl=1&amp;c=2&amp;m=3&amp;s=FORBIDDEN-prefs&amp;act=prefs">Manage your preferences</a></p>
+<img src="https://example.activehosted.com/lto.php?nl=1&amp;c=2&amp;m=3&amp;s=bb22&amp;l=open" alt="">
+</body></html>

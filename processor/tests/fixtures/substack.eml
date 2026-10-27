@@ -1,0 +1,42 @@
+From: Example Writer <example@substack.com>
+To: reader@example.org
+Subject: Hello world
+Date: Sun, 26 Oct 2026 12:00:00 +0000
+Message-ID: <fixture-substack@example.org>
+List-Unsubscribe: <https://example.substack.com/action/disable_email/FORBIDDEN-list-unsub?token=SECRET-LU>, <mailto:unsubscribe@example.org?subject=FORBIDDEN>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain; charset=utf-8
+
+View this post on the web at https://example.substack.com/p/hello-world
+
+Hello world.
+
+--b1
+Content-Type: text/html; charset=utf-8
+
+<html><head><style>.hero{background:url(https://substackcdn.com/image/fetch/w_1200/hero.png)}</style></head>
+<body>
+<img src="https://eotrx.substackcdn.com/open?token=PIXELTOKEN&amp;ref=1" alt="" style="display:none">
+<a href="https://substack.com/redirect/2/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlIjoiaHR0cHM6Ly9leGFtcGxlLnN1YnN0YWNrLmNvbS9wL2hlbGxvLXdvcmxkP3V0bV9zb3VyY2U9c3Vic3RhY2smdXRtX21lZGl1bT1lbWFpbCZ1dG1fY29udGVudD1zaGFyZSIsInAiOjEwMDEsInMiOjIwMDIsImYiOnRydWUsInUiOjMwMDMsImlhdCI6MTc2MTUwMDAwMCwiZXhwIjoxNzY0MDkyMDAwLCJpc3MiOiJwdWItMjAwMiIsInN1YiI6ImxpbmstcmVkaXJlY3QifQ.c2lnbmF0dXJl?j=eyJ1IjozMDAzfQ">Hello world</a>
+<img src="https://substackcdn.com/image/fetch/w_600/photo.jpg" srcset="https://substackcdn.com/image/fetch/w_600/photo.jpg 1x, https://substackcdn.com/image/fetch/w_1200/photo.jpg 2x" width="600" height="400" alt="A photo">
+<p>Read <a href="https://substack.com/redirect/6f1c2d3e-0000-4000-8000-000000000001?j=eyJ1IjozMDAzfQ">an article I liked</a>
+and <a href="https://email.mg1.substack.com/c/eJxOpaqueClickWrapper">a wrapped link</a>.</p>
+<p><a href="https://open.substack.com/pub/example/p/hello-world?r=abc12&amp;utm_campaign=post&amp;utm_medium=web&amp;showWelcomeOnShare=true">Read in app</a></p>
+<p><a href="https://substack.com/app-link/post?publication_id=1001&amp;post_id=2002&amp;utm_source=substack&amp;isFreemail=true&amp;submitLike=true&amp;token=SECRET-LIKE&amp;utm_medium=email">Like</a>
+<a href="https://substack.com/app-link/post?publication_id=1001&amp;post_id=2002&amp;utm_source=substack&amp;isFreemail=true&amp;comments=true&amp;token=SECRET-COMMENT&amp;utm_medium=email">Comment</a>
+<a href="https://substack.com/app-link/post?publication_id=1001&amp;post_id=2002&amp;utm_source=substack&amp;isFreemail=true&amp;triggerShare=true&amp;token=SECRET-SHARE&amp;utm_medium=email">Share</a></p>
+<p><a href="https://substack.com/redirect/2/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlIjoiaHR0cHM6Ly9leGFtcGxlLnN1YnN0YWNrLmNvbS9wL2hlbGxvLXdvcmxkP3Rva2VuPVNFQ1JFVC1MT0dJTiZyPWFiYyIsInAiOjEwMDF9.c2ln">Continue reading</a></p>
+<p><a href="https://example.substack.com/p/hello-world?utm_source=substack&amp;utm_medium=email&amp;utm_content=share&amp;action=share">Share this post</a></p>
+<p><a href="https://example.substack.com/subscribe?utm_source=email&amp;r=abc12">Subscribe</a></p>
+<p><a href="https://substack.com/redirect/2/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlIjoiaHR0cHM6Ly9leGFtcGxlLnN1YnN0YWNrLmNvbS9hY3Rpb24vZGlzYWJsZV9lbWFpbD90b2tlbj1TRUNSRVQtVU5TVUIiLCJwIjoxMDAxfQ.c2ln?FORBIDDEN=via-redirect">Stop these</a></p>
+<p>Malformed: <a href="https://substack.com/redirect/2/eyJub3QiOiJqc29u.bm90LWpzb24.c2ln">broken redirect</a></p>
+<p class="footer"><a href="https://example.substack.com/action/disable_email?token=SECRET-UNSUB&amp;FORBIDDEN=1">Unsubscribe</a>
+<a href="https://example.substack.com/account?utm_source=email&amp;FORBIDDEN=manage">Manage subscription</a>
+<a href="https://substack.com/signup?utm_source=substack&amp;utm_medium=email&amp;utm_content=footer">Start writing</a>
+<a href="https://substack.com/app-link/post?publication_id=1001&amp;post_id=2002&amp;token=SECRET-APP">Get the app</a></p>
+</body></html>
+
+--b1--

@@ -1,0 +1,111 @@
+{
+  "embeds": [
+    {
+      "url": "https://mcusercontent.com/abc/images/logo.png",
+      "via": "img",
+      "pixel": false
+    },
+    {
+      "url": "https://example.us1.list-manage.com/track/open.php?u=aa11&id=cc33&e=bb22",
+      "via": "img",
+      "pixel": true
+    }
+  ],
+  "cid_parts": [],
+  "links": [
+    {
+      "href": "https://mailchi.mp/example/october-update?e=bb22",
+      "text": "View this email in your browser",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "https://mailchi.mp/example/october-update",
+      "fetch_url": "https://mailchi.mp/example/october-update"
+    },
+    {
+      "href": "https://example.us1.list-manage.com/track/click?u=aa11&id=dd44&e=bb22",
+      "text": "annual report",
+      "link_class": "tracking-redirect",
+      "decision": "resolve",
+      "reason": "mailchimp redirect, opaque",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": "https://example.us1.list-manage.com/track/click?u=aa11&id=dd44&e=bb22"
+    },
+    {
+      "href": "https://www.example.org/news/october?utm_source=newsletter&utm_medium=email&utm_campaign=oct&mc_cid=cc33&mc_eid=bb22",
+      "text": "here is the news",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "https://www.example.org/news/october",
+      "fetch_url": "https://www.example.org/news/october"
+    },
+    {
+      "href": "https://www.example.org/events/42/rsvp?FORBIDDEN=rsvp",
+      "text": "RSVP",
+      "link_class": "action",
+      "decision": "skip",
+      "reason": "path segment 'rsvp'",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": null
+    },
+    {
+      "href": "https://example.us1.list-manage.com/subscribe/confirm?u=aa11&id=ee55&e=FORBIDDEN-confirm",
+      "text": "Confirm subscription",
+      "link_class": "action",
+      "decision": "skip",
+      "reason": "path segment 'confirm'",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": null
+    },
+    {
+      "href": "https://example.us1.list-manage.com/vcard?u=aa11&id=ee55",
+      "text": "Add us to your address book",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "https://example.us1.list-manage.com/vcard?u=aa11&id=ee55",
+      "fetch_url": "https://example.us1.list-manage.com/vcard?u=aa11&id=ee55"
+    },
+    {
+      "href": "https://us1.forward-to-friend.com/forward?u=aa11&id=dd44&e=bb22",
+      "text": "Forward",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "https://us1.forward-to-friend.com/forward?u=aa11&id=dd44",
+      "fetch_url": "https://us1.forward-to-friend.com/forward?u=aa11&id=dd44"
+    },
+    {
+      "href": "https://example.us1.list-manage.com/profile?u=aa11&id=ee55&e=FORBIDDEN-profile",
+      "text": "update your preferences",
+      "link_class": "unsubscribe",
+      "decision": "skip",
+      "reason": "url looks like unsubscribe or preferences",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": null
+    },
+    {
+      "href": "https://example.us1.list-manage.com/unsubscribe?u=aa11&id=ee55&e=FORBIDDEN-unsub&c=cc33",
+      "text": "unsubscribe from this list",
+      "link_class": "unsubscribe",
+      "decision": "skip",
+      "reason": "url looks like unsubscribe or preferences",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": null
+    }
+  ],
+  "list_unsubscribe": [
+    "https://example.us1.list-manage.com/unsubscribe?u=FORBIDDEN-lu&id=aa11&e=bb22&c=cc33",
+    "mailto:unsubscribe-mc.us1_FORBIDDEN@inbound.mailchimp.com"
+  ]
+}

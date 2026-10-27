@@ -1,0 +1,201 @@
+{
+  "embeds": [
+    {
+      "url": "https://eotrx.substackcdn.com/open?token=PIXELTOKEN&ref=1",
+      "via": "img",
+      "pixel": true
+    },
+    {
+      "url": "https://substackcdn.com/image/fetch/w_600/photo.jpg",
+      "via": "img",
+      "pixel": false
+    },
+    {
+      "url": "https://substackcdn.com/image/fetch/w_1200/photo.jpg",
+      "via": "img",
+      "pixel": false
+    },
+    {
+      "url": "https://substackcdn.com/image/fetch/w_1200/hero.png",
+      "via": "style",
+      "pixel": false
+    }
+  ],
+  "cid_parts": [],
+  "links": [
+    {
+      "href": "https://substack.com/redirect/2/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlIjoiaHR0cHM6Ly9leGFtcGxlLnN1YnN0YWNrLmNvbS9wL2hlbGxvLXdvcmxkP3V0bV9zb3VyY2U9c3Vic3RhY2smdXRtX21lZGl1bT1lbWFpbCZ1dG1fY29udGVudD1zaGFyZSIsInAiOjEwMDEsInMiOjIwMDIsImYiOnRydWUsInUiOjMwMDMsImlhdCI6MTc2MTUwMDAwMCwiZXhwIjoxNzY0MDkyMDAwLCJpc3MiOiJwdWItMjAwMiIsInN1YiI6ImxpbmstcmVkaXJlY3QifQ.c2lnbmF0dXJl?j=eyJ1IjozMDAzfQ",
+      "text": "Hello world",
+      "link_class": "tracking-redirect",
+      "decision": "resolve",
+      "reason": "substack redirect, target decoded",
+      "decoded": "https://example.substack.com/p/hello-world?utm_source=substack&utm_medium=email&utm_content=share",
+      "canonical": "https://example.substack.com/p/hello-world",
+      "fetch_url": "https://substack.com/redirect/2/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlIjoiaHR0cHM6Ly9leGFtcGxlLnN1YnN0YWNrLmNvbS9wL2hlbGxvLXdvcmxkP3V0bV9zb3VyY2U9c3Vic3RhY2smdXRtX21lZGl1bT1lbWFpbCZ1dG1fY29udGVudD1zaGFyZSIsInAiOjEwMDEsInMiOjIwMDIsImYiOnRydWUsInUiOjMwMDMsImlhdCI6MTc2MTUwMDAwMCwiZXhwIjoxNzY0MDkyMDAwLCJpc3MiOiJwdWItMjAwMiIsInN1YiI6ImxpbmstcmVkaXJlY3QifQ.c2lnbmF0dXJl?j=eyJ1IjozMDAzfQ"
+    },
+    {
+      "href": "https://substack.com/redirect/6f1c2d3e-0000-4000-8000-000000000001?j=eyJ1IjozMDAzfQ",
+      "text": "an article I liked",
+      "link_class": "tracking-redirect",
+      "decision": "resolve",
+      "reason": "substack redirect, opaque",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": "https://substack.com/redirect/6f1c2d3e-0000-4000-8000-000000000001?j=eyJ1IjozMDAzfQ"
+    },
+    {
+      "href": "https://email.mg1.substack.com/c/eJxOpaqueClickWrapper",
+      "text": "a wrapped link",
+      "link_class": "tracking-redirect",
+      "decision": "resolve",
+      "reason": "mailgun redirect, opaque",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": "https://email.mg1.substack.com/c/eJxOpaqueClickWrapper"
+    },
+    {
+      "href": "https://open.substack.com/pub/example/p/hello-world?r=abc12&utm_campaign=post&utm_medium=web&showWelcomeOnShare=true",
+      "text": "Read in app",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "https://example.substack.com/p/hello-world",
+      "fetch_url": "https://example.substack.com/p/hello-world"
+    },
+    {
+      "href": "https://substack.com/app-link/post?publication_id=1001&post_id=2002&utm_source=substack&isFreemail=true&submitLike=true&token=SECRET-LIKE&utm_medium=email",
+      "text": "Like",
+      "link_class": "login-token",
+      "decision": "capture",
+      "reason": "auth parameter stripped",
+      "decoded": null,
+      "canonical": "https://substack.com/app-link/post?publication_id=1001&post_id=2002",
+      "fetch_url": "https://substack.com/app-link/post?publication_id=1001&post_id=2002"
+    },
+    {
+      "href": "https://substack.com/app-link/post?publication_id=1001&post_id=2002&utm_source=substack&isFreemail=true&comments=true&token=SECRET-COMMENT&utm_medium=email",
+      "text": "Comment",
+      "link_class": "login-token",
+      "decision": "capture",
+      "reason": "auth parameter stripped",
+      "decoded": null,
+      "canonical": "https://substack.com/app-link/post?publication_id=1001&post_id=2002",
+      "fetch_url": "https://substack.com/app-link/post?publication_id=1001&post_id=2002"
+    },
+    {
+      "href": "https://substack.com/app-link/post?publication_id=1001&post_id=2002&utm_source=substack&isFreemail=true&triggerShare=true&token=SECRET-SHARE&utm_medium=email",
+      "text": "Share",
+      "link_class": "login-token",
+      "decision": "capture",
+      "reason": "auth parameter stripped",
+      "decoded": null,
+      "canonical": "https://substack.com/app-link/post?publication_id=1001&post_id=2002",
+      "fetch_url": "https://substack.com/app-link/post?publication_id=1001&post_id=2002"
+    },
+    {
+      "href": "https://substack.com/redirect/2/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlIjoiaHR0cHM6Ly9leGFtcGxlLnN1YnN0YWNrLmNvbS9wL2hlbGxvLXdvcmxkP3Rva2VuPVNFQ1JFVC1MT0dJTiZyPWFiYyIsInAiOjEwMDF9.c2ln",
+      "text": "Continue reading",
+      "link_class": "login-token",
+      "decision": "capture",
+      "reason": "substack redirect to a login-token URL",
+      "decoded": "https://example.substack.com/p/hello-world?token=SECRET-LOGIN&r=abc",
+      "canonical": "https://example.substack.com/p/hello-world",
+      "fetch_url": "https://example.substack.com/p/hello-world"
+    },
+    {
+      "href": "https://example.substack.com/p/hello-world?utm_source=substack&utm_medium=email&utm_content=share&action=share",
+      "text": "Share this post",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "https://example.substack.com/p/hello-world",
+      "fetch_url": "https://example.substack.com/p/hello-world"
+    },
+    {
+      "href": "https://example.substack.com/subscribe?utm_source=email&r=abc12",
+      "text": "Subscribe",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "https://example.substack.com/subscribe",
+      "fetch_url": "https://example.substack.com/subscribe"
+    },
+    {
+      "href": "https://substack.com/redirect/2/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlIjoiaHR0cHM6Ly9leGFtcGxlLnN1YnN0YWNrLmNvbS9hY3Rpb24vZGlzYWJsZV9lbWFpbD90b2tlbj1TRUNSRVQtVU5TVUIiLCJwIjoxMDAxfQ.c2ln?FORBIDDEN=via-redirect",
+      "text": "Stop these",
+      "link_class": "unsubscribe",
+      "decision": "skip",
+      "reason": "redirect target: url looks like unsubscribe or preferences",
+      "decoded": "https://example.substack.com/action/disable_email?token=SECRET-UNSUB",
+      "canonical": null,
+      "fetch_url": null
+    },
+    {
+      "href": "https://substack.com/redirect/2/eyJub3QiOiJqc29u.bm90LWpzb24.c2ln",
+      "text": "broken redirect",
+      "link_class": "tracking-redirect",
+      "decision": "resolve",
+      "reason": "substack redirect, opaque",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": "https://substack.com/redirect/2/eyJub3QiOiJqc29u.bm90LWpzb24.c2ln"
+    },
+    {
+      "href": "https://example.substack.com/action/disable_email?token=SECRET-UNSUB&FORBIDDEN=1",
+      "text": "Unsubscribe",
+      "link_class": "unsubscribe",
+      "decision": "skip",
+      "reason": "url looks like unsubscribe or preferences",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": null
+    },
+    {
+      "href": "https://example.substack.com/account?utm_source=email&FORBIDDEN=manage",
+      "text": "Manage subscription",
+      "link_class": "unsubscribe",
+      "decision": "skip",
+      "reason": "url looks like unsubscribe or preferences",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": null
+    },
+    {
+      "href": "https://substack.com/signup?utm_source=substack&utm_medium=email&utm_content=footer",
+      "text": "Start writing",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "https://substack.com/signup",
+      "fetch_url": "https://substack.com/signup"
+    },
+    {
+      "href": "https://substack.com/app-link/post?publication_id=1001&post_id=2002&token=SECRET-APP",
+      "text": "Get the app",
+      "link_class": "login-token",
+      "decision": "capture",
+      "reason": "auth parameter stripped",
+      "decoded": null,
+      "canonical": "https://substack.com/app-link/post?publication_id=1001&post_id=2002",
+      "fetch_url": "https://substack.com/app-link/post?publication_id=1001&post_id=2002"
+    },
+    {
+      "href": "https://example.substack.com/p/hello-world",
+      "text": "",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "https://example.substack.com/p/hello-world",
+      "fetch_url": "https://example.substack.com/p/hello-world"
+    }
+  ],
+  "list_unsubscribe": [
+    "https://example.substack.com/action/disable_email/FORBIDDEN-list-unsub?token=SECRET-LU",
+    "mailto:unsubscribe@example.org?subject=FORBIDDEN"
+  ]
+}

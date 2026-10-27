@@ -1,0 +1,250 @@
+{
+  "embeds": [
+    {
+      "url": "https://www.example.com/img/footer.png",
+      "via": "img",
+      "pixel": false
+    },
+    {
+      "url": "https://www.example.com/img/banner.jpg",
+      "via": "style",
+      "pixel": false
+    },
+    {
+      "url": "https://fonts.example.com/serif.woff2",
+      "via": "style",
+      "pixel": false
+    },
+    {
+      "url": "https://fonts.example.com/css?family=Serif",
+      "via": "stylesheet",
+      "pixel": false
+    }
+  ],
+  "cid_parts": [
+    "logo@example.com"
+  ],
+  "links": [
+    {
+      "href": "https://www.example.com/files/zine-october.pdf",
+      "text": "Our zine (PDF)",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "https://www.example.com/files/zine-october.pdf",
+      "fetch_url": "https://www.example.com/files/zine-october.pdf"
+    },
+    {
+      "href": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&utm_source=letter",
+      "text": "Watch",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      "fetch_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    },
+    {
+      "href": "http://old.example.com/archive/2019/",
+      "text": "An old page over http",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "http://old.example.com/archive/2019/",
+      "fetch_url": "http://old.example.com/archive/2019/"
+    },
+    {
+      "href": "https://www.example.com/search?s=archives&utm_medium=email",
+      "text": "Search results",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "https://www.example.com/search?s=archives",
+      "fetch_url": "https://www.example.com/search?s=archives"
+    },
+    {
+      "href": "https://WWW.Example.com:443/About#team",
+      "text": "About us",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "https://www.example.com/About",
+      "fetch_url": "https://www.example.com/About"
+    },
+    {
+      "href": "https://partner.example.com/report?access_token=SECRET-AT&id=7",
+      "text": "Partner report",
+      "link_class": "login-token",
+      "decision": "capture",
+      "reason": "auth parameter stripped",
+      "decoded": null,
+      "canonical": "https://partner.example.com/report?id=7",
+      "fetch_url": "https://partner.example.com/report?id=7"
+    },
+    {
+      "href": "https://www.example.com/community/vote/12?FORBIDDEN=vote",
+      "text": "Vote",
+      "link_class": "action",
+      "decision": "skip",
+      "reason": "path segment 'vote'",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": null
+    },
+    {
+      "href": "https://www.example.com/poll?FORBIDDEN=poll&answer=yes",
+      "text": "Yes",
+      "link_class": "action",
+      "decision": "skip",
+      "reason": "path segment 'poll'",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": null
+    },
+    {
+      "href": "https://www.example.com/newsletter/confirm?code=FORBIDDEN-confirm",
+      "text": "Confirm",
+      "link_class": "action",
+      "decision": "skip",
+      "reason": "path segment 'confirm'",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": null
+    },
+    {
+      "href": "https://www.example.com/unsubscribe-from-the-news-cycle",
+      "text": "A post about unsubscribing from the news cycle",
+      "link_class": "unsubscribe",
+      "decision": "skip",
+      "reason": "url looks like unsubscribe or preferences",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": null
+    },
+    {
+      "href": "https://click.example.com/abc123",
+      "text": "Tracked by a generic click host",
+      "link_class": "tracking-redirect",
+      "decision": "resolve",
+      "reason": "heuristic redirect, opaque",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": "https://click.example.com/abc123"
+    },
+    {
+      "href": "http://intranet.example.com/admin",
+      "text": "Internal link that resolves privately",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "http://intranet.example.com/admin",
+      "fetch_url": "http://intranet.example.com/admin"
+    },
+    {
+      "href": "http://192.168.1.1/",
+      "text": "Router",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "http://192.168.1.1/",
+      "fetch_url": "http://192.168.1.1/"
+    },
+    {
+      "href": "http://[::1]/",
+      "text": "Loopback",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "http://[::1]/",
+      "fetch_url": "http://[::1]/"
+    },
+    {
+      "href": "http://169.254.169.254/latest/meta-data/",
+      "text": "Metadata",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "http://169.254.169.254/latest/meta-data/",
+      "fetch_url": "http://169.254.169.254/latest/meta-data/"
+    },
+    {
+      "href": "https://user:pw@www.example.com/private",
+      "text": "Credentials in URL",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "https://www.example.com/private",
+      "fetch_url": "https://www.example.com/private"
+    },
+    {
+      "href": "mailto:letters@example.com?subject=FORBIDDEN",
+      "text": "Write to us",
+      "link_class": "non-web",
+      "decision": "skip",
+      "reason": "scheme 'mailto'",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": null
+    },
+    {
+      "href": "tel:+15555550100",
+      "text": "Call",
+      "link_class": "non-web",
+      "decision": "skip",
+      "reason": "scheme 'tel'",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": null
+    },
+    {
+      "href": "javascript:alert('FORBIDDEN')",
+      "text": "Script",
+      "link_class": "non-web",
+      "decision": "skip",
+      "reason": "scheme 'javascript'",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": null
+    },
+    {
+      "href": "#top",
+      "text": "Back to top",
+      "link_class": "internal-anchor",
+      "decision": "skip",
+      "reason": "fragment within the message",
+      "decoded": null,
+      "canonical": null,
+      "fetch_url": null
+    },
+    {
+      "href": "https://www.example.com/",
+      "text": "[image: Home]",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "https://www.example.com/",
+      "fetch_url": "https://www.example.com/"
+    },
+    {
+      "href": "https://text-only.example.com/notes?ref=letter",
+      "text": "",
+      "link_class": "content",
+      "decision": "capture",
+      "reason": "",
+      "decoded": null,
+      "canonical": "https://text-only.example.com/notes?ref=letter",
+      "fetch_url": "https://text-only.example.com/notes?ref=letter"
+    }
+  ],
+  "list_unsubscribe": []
+}

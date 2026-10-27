@@ -8,13 +8,17 @@ The Cloudflare edge adapter for a newsletter archive. Mail to a subdomain hits
 a zone-wide Email Routing catch-all → ingest Worker, which applies a
 default-deny recipient policy, enforces daily caps, writes the raw `.eml` to R2,
 and forwards a backup copy. The same Worker's `fetch()` serves an admin
-dashboard behind Cloudflare Access. The processor, publishing pass, and site shown in
-the README diagram are **not in this repo** — don't add references to them as
-if they exist.
+dashboard behind Cloudflare Access.
+
+`processor/` holds `dea-capture`, the start of the link and embed archiver
+(phase 0: offline extraction, classification and safety guards; nothing
+fetches yet). The rest of the processor, the publishing pass, and the site
+shown in the README diagram are **not in this repo**. Don't add references to
+them as if they exist.
 
 ## Layout
 
-All code lives in `cloudflare/`:
+Edge code lives in `cloudflare/`:
 
 | Path                     | Purpose                                                        |
 | ------------------------ | -------------------------------------------------------------- |
@@ -28,7 +32,14 @@ All code lives in `cloudflare/`:
 | `*.sh`                   | Admin scripts wrapping `wrangler kv` (users, tags, export) and `mirror.sh` (rclone) |
 | `wrangler.toml.example`  | Template for the git-ignored `wrangler.toml`                   |
 
+`processor/` (Python, uv) is described in `processor/README.md`: `extract.py`
+(MIME, embeds, links), `classify.py` (link classes and decisions),
+`guard.py` (SSRF and never-fetch guard), `inventory.py`, `cli.py`.
+
 ## Commands
+
+For `processor/`: `uv run pytest`, `uv run ruff check . && uv run ruff format --check .`,
+`uv run mypy src tests`.
 
 Run from `cloudflare/`:
 
@@ -68,10 +79,17 @@ Run wrangler under Node, not Bun: `wrangler dev` under Bun answers every request
   outside this repo. Mention policy behavior changes in your summary so the
   port can be updated.
 
+- **`dea-capture` must never act as the subscriber.** Every request goes
+  through `guard.GuardedFetcher`. Rules about what not to fetch (unsubscribe,
+  preferences, actions, auth tokens) err towards skip. Any new ESP pattern gets
+  a synthetic fixture whose forbidden URLs contain `SECRET` or `FORBIDDEN`.
+  Never add real messages as fixtures. Classifier changes show up as diffs to
+  the golden `tests/fixtures/*.inventory.json`; review them.
+
 ## Don't commit
 
 `wrangler.toml` (real KV ids, domain, mailbox), `.wrangler/`, `node_modules/`,
-`.terraform/`, `*.tfstate*`, `*.tfvars`, `tags.json`. Do commit
+`.terraform/`, `*.tfstate*`, `*.tfvars`, `tags.json`, `.venv/`, real `.eml` files. Do commit
 `.terraform.lock.hcl`. Use placeholders like `example.org` in docs and examples,
 never real domains, mailboxes, or account ids.
 
