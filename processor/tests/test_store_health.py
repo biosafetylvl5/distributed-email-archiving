@@ -1,0 +1,80 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import boto3
+import pytest
+from botocore.stub import Stubber
+
+from dea_capture import health
+from dea_capture.store import LocalStore, S3Store, split_s3_uri
+
+
+def test_local_store_claims_once(tmp_path: Path) -> None:
+    s = LocalStore(tmp_path)
+    assert s.put("a/b.json", b"1", "application/json", if_absent=True)
+    assert not s.put("a/b.json", b"2", "application/json", if_absent=True)
+    assert s.get("a/b.json") == b"1"
+    assert s.put("a/b.json", b"3", "application/json")
+    assert s.get("a/b.json") == b"3" and s.exists("a/b.json") and not s.exists("nope")
+
+
+def test_local_store_stays_inside_its_root(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        LocalStore(tmp_path / "root").put("../escape", b"", "text/plain")
+
+
+def _s3() -> S3Store:
+    client = boto3.client(
+        "s3", region_name="auto", endpoint_url="https://s3.example.invalid",
+        aws_access_key_id="x", aws_secret_access_key="y",
+    )  # fmt: skip
+    return S3Store("bucket", client)
+
+
+def test_s3_conditional_put() -> None:
+    s = _s3()
+    with Stubber(s.client) as stub:
+        expected = {
+            "Bucket": "bucket", "Key": "k", "Body": b"d", "ContentType": "text/plain",
+            "IfNoneMatch": "*",
+        }  # fmt: skip
+        stub.add_response("put_object", {}, expected)
+        stub.add_client_error("put_object", "PreconditionFailed", http_status_code=412)
+        assert s.put("k", b"d", "text/plain", if_absent=True)
+        assert not s.put("k", b"d", "text/plain", if_absent=True)
+
+
+def test_s3_exists() -> None:
+    s = _s3()
+    with Stubber(s.client) as stub:
+        stub.add_response("head_object", {}, {"Bucket": "bucket", "Key": "k"})
+        stub.add_client_error("head_object", "404", http_status_code=404)
+        assert s.exists("k")
+        assert not s.exists("k")
+
+
+def test_split_s3_uri() -> None:
+    assert split_s3_uri("s3://b/incoming/archive/x.eml") == ("b", "incoming/archive/x.eml")
+    for bad in ("s3://b/", "https://b/k", "s3:///k"):
+        with pytest.raises(ValueError):
+            split_s3_uri(bad)
+
+
+METRICS = """\
+# HELP courier_data_monitor_last_scan_timestamp_seconds Last scan
+# TYPE courier_data_monitor_last_scan_timestamp_seconds gauge
+courier_data_monitor_last_scan_timestamp_seconds{monitor_identifier="watch",monitor_name="s3_poller"} 1.7615e+09
+courier_service_uptime_seconds 99.0
+"""  # noqa: E501
+
+
+def test_health_fresh_and_stale() -> None:
+    assert health.check(METRICS, 900, now=1.7615e9 + 60) == (True, "last scan 60s ago")
+    ok, why = health.check(METRICS, 900, now=1.7615e9 + 1000)
+    assert not ok and "1000s" in why
+
+
+def test_health_without_a_scan_is_unhealthy() -> None:
+    ok, why = health.check("courier_service_uptime_seconds 5\n", 900, now=0)
+    assert not ok and "no " in why

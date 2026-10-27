@@ -11,8 +11,8 @@ and forwards a backup copy. The same Worker's `fetch()` serves an admin
 dashboard behind Cloudflare Access.
 
 `processor/` holds `dea-capture`, the start of the link and embed archiver
-(phase 0: offline extraction, classification and safety guards; nothing
-fetches yet). The rest of the processor, the publishing pass, and the site
+(phase 1: classification, safety guards, and the `issue` stage that stores
+each message's embeds, run as a courier service). Link capture, the rest of the processor, the publishing pass, and the site
 shown in the README diagram are **not in this repo**. Don't add references to
 them as if they exist.
 
@@ -34,12 +34,17 @@ Edge code lives in `cloudflare/`:
 
 `processor/` (Python, uv) is described in `processor/README.md`: `extract.py`
 (MIME, embeds, links), `classify.py` (link classes and decisions),
-`guard.py` (SSRF and never-fetch guard), `inventory.py`, `cli.py`.
+`guard.py` (SSRF and never-fetch guard), `inventory.py`, `fetch.py` (pinned-address
+HTTP, redirect following), `store.py` (R2/S3 or a directory), `issue.py` (the
+`issue` stage), `health.py` (liveness), `cli.py`. `deploy/service.yaml` is the
+courier service; `Dockerfile` and `.github/workflows/processor.yml` build and
+publish the image.
 
 ## Commands
 
 For `processor/`: `uv run pytest`, `uv run ruff check . && uv run ruff format --check .`,
-`uv run mypy src tests`.
+`uv run mypy src tests`, `uv run --extra service courier validate deploy/service.yaml`.
+Courier is pinned to a commit in `pyproject.toml`; bump it there and `uv lock`.
 
 Run from `cloudflare/`:
 

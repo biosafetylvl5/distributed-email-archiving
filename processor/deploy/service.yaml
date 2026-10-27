@@ -1,0 +1,57 @@
+# The courier service that runs dea-capture: one pod, in-memory broker.
+#
+#   watch-issues   polls the archive for new .eml objects
+#   issue-builder  makes one job per message
+#   issue          runs `dea-capture issue s3://<bucket>/<key>`
+#
+# Credentials and the R2 endpoint come from the environment (AWS_ACCESS_KEY_ID,
+# AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL), never from this file. On restart the
+# poller sends every key again; `issue` skips messages that already have a
+# manifest, so that costs one HEAD request each.
+apiVersion: runcourier.dev/v1alpha1
+kind: Service
+metadata:
+  name: dea-capture
+  namespace: newsletter-archiving
+  description: Captures what archived newsletters embed and link to.
+spec:
+  service_config:
+    heartbeat_interval: 30
+  broker:
+    transport: memory
+  run:
+    - watch-issues:
+        kind: data_monitor
+        name: s3_poller
+        config:
+          bucket: newsletter-archive
+          prefix: incoming/archive/
+          suffix_filter: [".eml"]
+          region: auto
+          poll_interval_seconds: 300
+          run_on_start: true
+    - issue-builder:
+        kind: job_builder
+        name: filter_and_group
+        config:
+          files_per_job: 1
+          targets:
+            - issue
+          payload:
+            issue-payload:
+              kind: payload
+              name: shell_payload
+              config:
+                # binary mode: every argument is its own argv entry, so an
+                # object key is never parsed by a shell
+                binary: dea-capture
+                prefix_args:
+                  - issue
+                  - "{{ files[0].file }}"
+    - issue:
+        kind: dispatcher
+        name: local_dispatcher
+        config:
+          max_workers: 2
+          timeout_seconds: 1800
+          log_to_logger: true

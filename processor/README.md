@@ -9,9 +9,11 @@ reader of a message would encounter and fetches it once. It never follows a
 link that would change the subscription or act publicly in the subscriber's
 name.
 
-**Status: phase 0.** Extraction, classification and the safety guards
-exist and are tested. Nothing fetches yet. The capture stages, which will run
-as a [courier](https://github.com/CIRA-GEOIPS/courier) service, come next.
+**Status: phase 1.** Extraction, classification and the safety guards
+exist and are tested. The first capture stage, `issue`, fetches and stores
+every embed of each archived message. It runs as a
+[courier](https://github.com/CIRA-GEOIPS/courier) service. Link capture
+comes in later phases.
 
 ## What it does with each link
 
@@ -49,12 +51,56 @@ decided:
   any extra ranges you configure, such as cluster CIDRs. The checked
   addresses are passed to the fetcher so it can pin the connection to them.
 
+`fetch.HttpFetcher` connects to those addresses and never resolves the name
+again; TLS still checks the certificate against the original host. It never
+follows redirects itself. `fetch.follow` sends every hop back through the
+guard, so a click tracker that lands on an unsubscribe page is refused before
+that request is made.
+
+## The `issue` stage
+
+`dea-capture issue s3://bucket/incoming/archive/<key>.eml` writes, under
+`issues/<sha256 of the .eml>/` in the same bucket:
+
+- `links.json`: the classified link inventory. Private: it has the original
+  hrefs.
+- `assets/<sha256 of body><ext>`: each embed body and inline `cid:` part.
+- `assets/manifest.json`: one record per embed, with its status (`ok`,
+  `failed`, `refused`, `deferred:size`), redirect chain, size and type. It
+  is written last, so a message with a manifest is done and is skipped.
+
+Requests to one host are at least a second apart. Bodies over 50 MiB are
+deferred, not fetched. `DEA_EXTRA_BLOCKED` (comma-separated CIDRs) adds
+ranges to refuse, such as the cluster's pod and service networks.
+`DEA_MODE=dry-run` makes it print counts and fetch nothing. Its stdout is one
+line of counts per message, with no URLs.
+
+## Running it as a service
+
+`deploy/service.yaml` is the courier service: an S3 poller on
+`incoming/archive/`, one job per `.eml`, and a local dispatcher that runs
+`dea-capture issue`. It needs `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+and `AWS_ENDPOINT_URL` (the R2 S3 endpoint) in the environment. The object
+key is passed as its own argument, never through a shell.
+
+The `Dockerfile` builds it with courier pinned to a commit (the `service`
+extra). GitHub Actions publishes `ghcr.io/<owner>/dea-capture` for
+linux/amd64 on every push to `main` that touches `processor/`.
+
+Courier never restarts a crashed plugin, and the process keeps looking
+healthy. Use `dea-capture healthcheck` as the liveness probe. It fails
+when the poller's last completed scan, from courier's metrics on port 8000,
+is older than `--max-scan-age` (default 900 s). Give it a startup probe
+with room for the first full scan.
+
 ## Usage
 
 ```sh
 uv sync
 uv run dea-capture inventory message.eml           # full dry run, as JSON
 uv run dea-capture inventory --summary --total *.eml  # counts only, no URLs
+uv run dea-capture issue message.eml --out ./out    # fetch embeds into ./out
+uv run --extra service courier run deploy/service.yaml
 ```
 
 The full inventory contains the original hrefs, which often carry
@@ -66,7 +112,8 @@ no URLs.
 ```sh
 uv run pytest
 uv run ruff check . && uv run ruff format --check .
-uv run mypy src
+uv run mypy src tests
+uv run --extra service courier validate deploy/service.yaml
 ```
 
 `tests/fixtures/*.eml` are synthetic messages, one per sender pattern. Every
