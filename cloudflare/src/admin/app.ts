@@ -18,7 +18,15 @@ import {
 } from "../settings";
 import { authenticate, type AuthResult } from "./auth";
 import { archiveStats, CHART_DAYS } from "./stats";
-import { captureSummary, type ArchivedMessage, type CaptureState, type CaptureSummary } from "./captures";
+import {
+  captureSummary,
+  URL_KINDS,
+  URL_STATUSES,
+  type ArchivedMessage,
+  type CaptureState,
+  type CaptureSummary,
+  type UrlCaptures,
+} from "./captures";
 import { html, page, securityHeaders, type Html } from "./html";
 import {
   getQuarantined,
@@ -284,9 +292,24 @@ ${c.states.done} complete, <a href="/captures?state=partial">${c.states.partial}
 <tr><th>Embedded files</th><td>${t.assets_ok} stored, ${t.assets_failed} failed, ${t.assets_deferred} deferred, ${t.assets_refused} refused
 <br><span class="muted">${t.pixels} of them tracking pixels</span></td></tr>
 <tr><th>Links</th><td>${t.links} found: ${t.links_capture} to capture, ${t.links_resolve} redirects to resolve, ${t.links_skip} never fetched
-<br><span class="muted">Link capture isn't running yet.</span></td></tr>
+<br>Resolved and queued for ${c.linkStates.done + c.linkStates.partial} of ${c.states.done + c.states.partial} processed messages:
+${t.links_resolved} redirects followed, ${t.links_unresolved} couldn't be, ${t.links_refused} refused</td></tr>
+<tr><th>Linked URLs</th><td>${urlTable(c.urls)}</td></tr>
 <tr><th>Last processed</th><td title="${c.lastCompleted?.toISOString() ?? ""}">${agoTime(c.lastCompleted, now)}
 <span class="muted">· new mail is picked up within about 5 minutes</span></td></tr></table>`;
+}
+
+const URL_KIND_LABELS = { page: "Pages", direct: "Files", media: "Media" } as const;
+
+function urlTable(u: UrlCaptures): Html {
+  if (u.total === 0) return html`<span class="muted">none queued yet</span>`;
+  const cols = URL_STATUSES.filter((s) => URL_KINDS.some((k) => u.byKind[k][s] > 0));
+  return html`${u.total} distinct URLs, each captured once however many messages link to it${u.wayback ? html`; ${u.wayback} from the Wayback Machine after the retries ran out` : ""}
+<table><tr><th></th>${cols.map((s) => html`<th>${s}</th>`)}</tr>
+${URL_KINDS.map(
+    (k) => html`<tr><th>${URL_KIND_LABELS[k]}</th>${cols.map((s) => html`<td>${u.byKind[k][s] || html`<span class="muted">0</span>`}</td>`)}</tr>`,
+  )}</table>
+<span class="muted">Page and media capture aren't running yet; those URLs wait in their queues.</span>`;
 }
 
 const CAPTURE_STATES = ["all", "partial", "pending", "done"] as const;
@@ -309,7 +332,8 @@ function captureRow(m: ArchivedMessage): Html {
   return html`<tr><td>${m.day}</td><td>${sub}</td><td><code title="${sha}">${sha.slice(0, 12)}</code></td>
 <td class="${c.state === "done" ? "status-approved" : "status-pending"}">${c.state === "done" ? "complete" : "partial"}</td>
 <td>${n.assets_ok}${problems.length ? html` <span class="status-pending">(${problems.join(", ")})</span>` : ""}</td>
-<td>${n.links_capture + n.links_resolve} <span class="muted">/ ${n.links}</span></td>
+<td>${n.links_capture + n.links_resolve} <span class="muted">/ ${n.links}</span>
+${c.linksState === "pending" ? html`<span class="muted">· not queued yet</span>` : html`<span class="muted">· ${n.captures_queued} URLs queued</span>${n.links_unresolved ? html` <span class="status-pending">(${n.links_unresolved} unresolved)</span>` : ""}`}</td>
 <td title="${c.completedAt?.toISOString() ?? ""}">${c.completedAt?.toISOString().slice(0, 16).replace("T", " ") ?? ""}</td></tr>`;
 }
 

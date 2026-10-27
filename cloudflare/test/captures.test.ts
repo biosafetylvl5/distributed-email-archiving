@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { handleAdmin, type Authenticator } from "../src/admin/app";
-import { parseStatus, summarizeCaptures } from "../src/admin/captures";
+import { parseStatus, summarizeCaptures, summarizeIndex } from "../src/admin/captures";
 import type { StoredObject } from "../src/admin/stats";
 import { fakeEnv } from "./fakes";
 
@@ -60,6 +60,40 @@ describe("summarizeCaptures", () => {
   });
 });
 
+const idx = (c: string, meta: Record<string, string>): StoredObject => ({
+  key: `captures/index/${sha(c)}.json`, size: 10, uploaded: new Date(), customMetadata: meta,
+});
+
+describe("summarizeIndex", () => {
+  it("counts URLs by kind and status and skips junk", () => {
+    const u = summarizeIndex([
+      idx("1", { kind: "page", status: "queued", updated_at: "2026-10-27T10:00:00+00:00" }),
+      idx("2", { kind: "direct", status: "ok", updated_at: "2026-10-27T11:00:00+00:00" }),
+      idx("3", { kind: "direct", status: "failed", wayback: "20260101000000" }),
+      idx("4", { kind: "nope", status: "ok" }),
+      idx("5", { kind: "page" }),
+      { key: "captures/index/short.json", size: 1, uploaded: new Date(), customMetadata: { kind: "page", status: "ok" } },
+    ]);
+    expect(u.total).toBe(3);
+    expect(u.byKind.page.queued).toBe(1);
+    expect(u.byKind.direct).toMatchObject({ ok: 1, failed: 1, queued: 0 });
+    expect(u.wayback).toBe(1);
+    expect(u.lastUpdated).toEqual(new Date("2026-10-27T11:00:00Z"));
+  });
+
+  it("reads each message's link state", () => {
+    const s = summarizeCaptures(
+      [eml("2026-10-24", "a"), eml("2026-10-25", "b")],
+      [
+        status("a", "2026-10-24", { state: "done", links_state: "done", captures_queued: "4", links_resolved: "3" }),
+        status("b", "2026-10-25", { state: "done" }),
+      ],
+    );
+    expect(s.linkStates).toEqual({ done: 1, partial: 0, pending: 1 });
+    expect(s.totals).toMatchObject({ captures_queued: 4, links_resolved: 3 });
+  });
+});
+
 describe("captures page and overview", () => {
   async function seeded() {
     const f = fakeEnv();
@@ -69,8 +103,11 @@ describe("captures page and overview", () => {
       customMetadata: {
         source: `s3://bucket/${emlKey("2026-10-25", "a")}`, state: "partial", assets_ok: "7", assets_failed: "2",
         links: "9", links_capture: "4", links_resolve: "3", links_skip: "2", completed_at: "2026-10-25T09:00:00Z",
+        links_state: "partial", links_resolved: "2", links_unresolved: "1", captures_queued: "5",
       },
     });
+    await f.archive.put(`captures/index/${sha("e")}.json`, "{}", { customMetadata: { kind: "page", status: "queued" } });
+    await f.archive.put(`captures/index/${sha("f")}.json`, "{}", { customMetadata: { kind: "direct", status: "ok" } });
     return f;
   }
 
@@ -81,6 +118,8 @@ describe("captures page and overview", () => {
     expect(all).toContain(sha("a").slice(0, 12));
     expect(all).toContain("(2 failed)");
     expect(all).toMatch(/>pending</);
+    expect(all).toContain("5 URLs queued");
+    expect(all).toContain("(1 unresolved)");
     const partial = await (await get(env, "/captures?state=partial")).text();
     expect(partial).toContain(sha("a").slice(0, 12));
     expect(partial).not.toContain(sha("b").slice(0, 12));
@@ -95,6 +134,10 @@ describe("captures page and overview", () => {
     expect(body).toContain("1 of 2 processed");
     expect(body).toContain("7 stored, 2 failed");
     expect(body).toContain("9 found: 4 to capture, 3 redirects to resolve, 2 never fetched");
+    expect(body).toContain("Resolved and queued for 1 of 1 processed messages");
+    expect(body).toContain("2 redirects followed, 1 couldn't be");
+    expect(body).toContain("2 distinct URLs");
+    expect(body).toMatch(/<tr><th>Files<\/th><td><span class="muted">0<\/span><\/td><td>1<\/td><\/tr>/);
     expect(body).toMatch(/1 <span class="muted">\(<\/span><a class="status-pending" href="\/captures\?state=partial">1 partial<\/a>, <span class="muted">1 pending/);
   });
 });

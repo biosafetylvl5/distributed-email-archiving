@@ -101,9 +101,10 @@ The ingest Worker also serves a small dashboard (`src/admin/`) for:
   (stored in the `SETTINGS` KV namespace; blank falls back to `wrangler.toml`)
 - **Quarantine:** the 50 most recent quarantined messages, with download and promote-to-archive
 - **Captures:** per message, what `dea-capture` stored (embedded files by status, links by
-  decision), filterable to partial or pending messages. Read from `issue-status/` metadata
-  in one R2 listing; empty until the [processor](processor/README.md) runs
-- **Overview:** totals, capture progress and today's usage against the daily caps
+  decision, how many URLs it queued), filterable to partial or pending messages. Read from
+  `issue-status/` metadata in one R2 listing; empty until the [processor](processor/README.md) runs
+- **Overview:** totals, capture progress (including every linked URL by kind and status, from
+  `captures/index/` metadata) and today's usage against the daily caps
 
 It is protected by [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/applications/),
 and the Worker verifies the Access token itself. Until `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` are set,
