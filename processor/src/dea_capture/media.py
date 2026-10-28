@@ -9,7 +9,7 @@ else; from it:
 - a post whose chosen formats are estimated at more than ``MAX_BYTES`` is
   deferred without downloading.
 
-The second run downloads the formats the first one chose (best up to 1080p),
+The second run downloads the formats the first one chose (best up to 1080p, MP4 if it can),
 using yt-dlp's own downloader for every protocol, so ffmpeg only merges files
 on disk and never fetches anything itself.
 
@@ -44,7 +44,9 @@ from .proxy import GuardProxy, ProxyStats
 from .store import Store, put_json
 
 MAX_BYTES = 3 * 1024**3
-FORMAT_SORT = "res:1080"
+# best up to 1080p, preferring MP4 and M4A streams, which merge into a file
+# browsers play
+FORMAT_SORT = "res:1080,ext"
 PROBE_TIMEOUT = 300
 DOWNLOAD_TIMEOUT = 90 * 60
 _SECRET_ENV = ("AWS_", "COURIER_")
