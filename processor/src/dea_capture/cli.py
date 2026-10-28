@@ -19,7 +19,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import __version__, capture, health, page
+from . import __version__, capture, health, media, page
 from .fetch import HttpFetcher
 from .guard import GuardedFetcher, IPNetwork
 from .inventory import Inventory, inventory
@@ -113,6 +113,7 @@ def _cmd_capture(args: argparse.Namespace) -> int:
         store, key, fetcher, now=datetime.now(UTC),
         wayback_fetcher=None if args.no_wayback else fetcher,
         page_crawler=_page_crawler(blocked),
+        media_grabber=_media_grabber(blocked),
     )  # fmt: skip
     print(result.line())
     return 0
@@ -123,6 +124,29 @@ def _page_crawler(blocked: list[IPNetwork]) -> Callable[[str], page.PageOutcome]
         return page.run_crawler(url, workdir, GuardProxy(extra_blocked=blocked), _user_agent())
 
     return lambda url: page.crawl_page(url, crawler, blocked)
+
+
+def _media_grabber(blocked: list[IPNetwork]) -> capture.MediaGrabber:
+    def grabber(url: str, workdir: Path) -> media.Grab:
+        return media.run_ytdlp(url, workdir, GuardProxy(extra_blocked=blocked))
+
+    return lambda url, keep: media.grab_media(url, grabber, keep, blocked)
+
+
+def _cmd_media(args: argparse.Namespace) -> int:
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    at = datetime.now(UTC).isoformat(timespec="seconds")
+    got = _media_grabber(_extra_blocked())(
+        args.url, lambda g: media.store_media(LocalStore(out), "", args.url, g, at)
+    )
+    summary = {
+        "outcome": got.outcome, "error": got.error,
+        "files": {name: path.name for name, path in got.files.items()},
+        "duration": got.info.get("duration"), "format": got.info.get("format"), **got.details,
+    }  # fmt: skip
+    print(json.dumps(summary))
+    return 0 if got.outcome == "ok" else 1
 
 
 def _cmd_page(args: argparse.Namespace) -> int:
@@ -216,6 +240,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("url", metavar="URL")
     p.add_argument("--out", metavar="DIR", required=True)
     p.set_defaults(func=_cmd_page)
+
+    p = sub.add_parser(
+        "media",
+        help="capture one video or audio post with yt-dlp, into a local directory",
+        description=(
+            "Grab URL with yt-dlp behind the guarding proxy and write media.<ext>, "
+            "thumbnail.<ext>, info.json and capture.json to --out DIR. Prints a summary "
+            "with no URLs."
+        ),
+    )
+    p.add_argument("url", metavar="URL")
+    p.add_argument("--out", metavar="DIR", required=True)
+    p.set_defaults(func=_cmd_media)
 
     p = sub.add_parser("healthcheck", help="liveness probe for the courier service")
     p.add_argument("--metrics", default="http://127.0.0.1:8000/metrics")

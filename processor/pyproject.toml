@@ -16,6 +16,9 @@ dependencies = [
 # a release carries the plugin-restart fix (see the link archiving plan).
 service = [
     "courier-pigeon[s3] @ https://github.com/CIRA-GEOIPS/courier/archive/3a12c6929a7733eac950dc6ed804e969c03fbbe8.tar.gz",
+    # capture-media; pinned, and bumped when sites change under it. "default"
+    # brings the YouTube challenge solver, which runs on the image's node.
+    "yt-dlp[default]==2026.10.26",
 ]
 
 [project.scripts]

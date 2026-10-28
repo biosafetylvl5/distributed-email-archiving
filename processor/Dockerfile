@@ -27,6 +27,11 @@ FROM webrecorder/browsertrix-crawler:1.15.1@sha256:710b08c749648fa9b2e0f73a3358b
 LABEL org.opencontainers.image.source="https://github.com/biosafetylvl5/distributed-email-archiving" \
       org.opencontainers.image.description="Captures what archived newsletters embed and link to" \
       org.opencontainers.image.licenses="Apache-2.0"
+# capture-media: ffmpeg merges the video and audio yt-dlp downloads
+USER root
+RUN command -v ffmpeg >/dev/null || { apt-get update \
+      && apt-get install -y --no-install-recommends ffmpeg \
+      && rm -rf /var/lib/apt/lists/*; }
 COPY --from=build /opt/dea /opt/dea
 COPY deploy/service.yaml /app/service.yaml
 ENV PATH=/opt/dea/bin:$PATH PYTHONUNBUFFERED=1 COLUMNS=240 HOME=/tmp

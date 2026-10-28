@@ -33,6 +33,7 @@ from . import __version__
 from .classify import tracking_vendor
 from .fetch import FetchError, HostPacer, TooLarge, follow
 from .guard import ForbiddenFetch, GuardedFetcher
+from .media import MediaOutcome, store_media
 from .page import PageOutcome, store_page
 from .store import Store, ext_for, put_json
 
@@ -213,9 +214,11 @@ def run(
     pacer: HostPacer | None = None,
     wayback_fetcher: GuardedFetcher | None = None,
     page_crawler: Callable[[str], PageOutcome] | None = None,
+    media_grabber: MediaGrabber | None = None,
 ) -> CaptureResult:
     """Run the capture a due key asks for. Page keys need ``page_crawler``,
-    which takes the canonical URL (see ``page.crawl_page``)."""
+    which takes the canonical URL (see ``page.crawl_page``); media keys need
+    ``media_grabber`` (see ``media.grab_media``)."""
     kind, _, h = parse_due_key(key)
     pacer = pacer or HostPacer()
     data = store.get(index_key(h))
@@ -240,7 +243,7 @@ def run(
         save(store, rec)
         store.delete(key)
         return CaptureResult(h, kind, "refused", rec.status, len(rec.attempts))
-    if kind == "media" or (kind == "page" and page_crawler is None):
+    if (kind == "page" and page_crawler is None) or (kind == "media" and media_grabber is None):
         raise NotImplementedError(f"no {kind} capture stage here")
 
     # take a lease: if this process dies, the lease falls due and it runs again
@@ -252,6 +255,9 @@ def run(
     if kind == "page":
         assert page_crawler is not None
         attempt = capture_page(store, rec, page_crawler, now)
+    elif kind == "media":
+        assert media_grabber is not None
+        attempt = capture_media(store, rec, media_grabber, now)
     else:
         attempt = capture_direct(store, rec, fetcher, pacer, now)
     rec.attempts.append(attempt)
@@ -348,6 +354,23 @@ def capture_page(
     folder = capture_dir(rec.h, now)
     store_page(store, folder, rec.canonical, got, at)
     return Attempt(at, "ok", got.http_status, capture=folder)
+
+
+# takes the canonical URL, and what to call with a good outcome while its files exist
+MediaGrabber = Callable[[str, Callable[[MediaOutcome], None]], MediaOutcome]
+
+
+def capture_media(
+    store: Store, rec: CaptureRecord, grabber: MediaGrabber, now: datetime
+) -> Attempt:
+    at = _iso(now)
+    folder = capture_dir(rec.h, now)
+    got = grabber(rec.canonical, lambda g: store_media(store, folder, rec.canonical, g, at))
+    if got.outcome == "ok":
+        return Attempt(at, "ok", capture=folder)
+    if got.outcome == "rerouted":
+        return Attempt(at, "rerouted", error=got.error, rerouted_to="page")
+    return Attempt(at, got.outcome, error=got.error)
 
 
 def wayback_raw(snapshot_url: str, timestamp: str) -> str:

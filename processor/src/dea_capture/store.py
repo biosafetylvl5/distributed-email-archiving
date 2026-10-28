@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,10 @@ class Store(Protocol):
         """Write ``key``. With ``if_absent``, returns False instead of
         overwriting an existing object. ``metadata`` becomes the object's
         user metadata (R2 ``customMetadata``)."""
+        ...
+
+    def put_file(self, key: str, path: Path, content_type: str) -> None:
+        """Write ``key`` from a file, without holding it in memory."""
         ...
 
     def delete(self, key: str) -> None:
@@ -67,6 +72,11 @@ class LocalStore:
 
     def _meta_path(self, key: str) -> Path:
         return self._path(f".meta/{key}.json")
+
+    def put_file(self, key: str, path: Path, content_type: str) -> None:
+        dest = self._path(key)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, dest)
 
     def metadata(self, key: str) -> dict[str, str] | None:
         """What ``put`` was given as ``metadata``, kept beside the store."""
@@ -150,6 +160,15 @@ class S3Store:
                 return False
             raise
         return True
+
+    def put_file(self, key: str, path: Path, content_type: str) -> None:
+        from boto3.s3.transfer import TransferConfig
+
+        # multipart in 64 MiB parts, two at a time: about 128 MiB in memory
+        config = TransferConfig(multipart_threshold=64 << 20, multipart_chunksize=64 << 20,
+                                max_concurrency=2)  # fmt: skip
+        self.client.upload_file(str(path), self.bucket, key, Config=config,
+                                ExtraArgs={"ContentType": content_type})  # fmt: skip
 
     def delete(self, key: str) -> None:
         self.client.delete_object(Bucket=self.bucket, Key=key)

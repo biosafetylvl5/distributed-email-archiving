@@ -12,12 +12,12 @@ name.
 **Status: phase 3.** Extraction, classification and the safety guards exist
 and are tested. The `issue` stage stores every embed of each archived
 message, then resolves its links and queues each landing page once.
-`capture` stores direct downloads (PDFs, images, files) and pages, which it
-loads in [browsertrix-crawler](https://github.com/webrecorder/browsertrix-crawler)
-behind a guarding proxy. It retries failures on a schedule and falls back to
-the Wayback Machine. It all runs as a
-[courier](https://github.com/CIRA-GEOIPS/courier) service. Media capture
-(yt-dlp) comes next.
+`capture` stores direct downloads (PDFs, images, files), pages, which it
+loads in [browsertrix-crawler](https://github.com/webrecorder/browsertrix-crawler),
+and video and audio posts, which it downloads with
+[yt-dlp](https://github.com/yt-dlp/yt-dlp), both behind a guarding proxy. It
+retries failures on a schedule and falls back to the Wayback Machine. It all
+runs as a [courier](https://github.com/CIRA-GEOIPS/courier) service.
 
 ## What it does with each link
 
@@ -150,6 +150,20 @@ Failures retry on the same schedule. The crawler's log, which names every URL
 the page loaded, stays in a temporary directory. `dea-capture page URL --out
 DIR` captures one page locally, in the container image.
 
+Media keys (video sites, audio and video files) go to yt-dlp behind the same
+proxy. It first reads the post's metadata only. A channel or playlist moves
+to the `page` queue, a live or upcoming stream is retried later, and a post
+estimated at more than 3 GiB (best format up to 1080p) is `deferred`. Then it
+downloads with its own downloader for every protocol, so ffmpeg only merges
+files on disk. The folder gets `media.<ext>`, `thumbnail.<ext>`, `info.json`
+(the post's metadata, without signed format URLs or request headers) and
+`capture.json`; files stream from disk to the store. `dea-capture media URL
+--out DIR` grabs one locally.
+
+A link whose tracker answered without redirecting (a 429, say) stays
+unresolved: the tracker's URL carries the reader's token, so it is never
+queued, and the capture stages refuse one without requesting it.
+
 Only canonical URLs, with tracking and auth parameters and email addresses
 removed, are stored under `captures/`.
 
@@ -157,21 +171,23 @@ removed, are stored under `captures/`.
 
 `deploy/service.yaml` is the courier service. An S3 poller on
 `incoming/archive/` makes one job per `.eml` for `dea-capture issue`. An
-`s3_due_poller` each on `captures/due/direct/` and `captures/due/page/` makes
+`s3_due_poller` each on `captures/due/direct/`, `captures/due/page/` and
+`captures/due/media/` makes
 one job per due key for `dea-capture capture`. That poller is courier's S3
 poller, except that it emits a key only once the time in its name has passed. It comes with this
 package as a courier plugin. The service needs `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY` and `AWS_ENDPOINT_URL` (the R2 S3 endpoint) in the environment. The object
-key is passed as its own argument, never through a shell. The crawler gets
-the environment without the `AWS_*` credentials.
+key is passed as its own argument, never through a shell. The crawler and
+yt-dlp get the environment without the `AWS_*` credentials.
 
 The `Dockerfile` builds it on the browsertrix-crawler image, with courier
 pinned to a commit (the `service` extra). GitHub Actions publishes
 `ghcr.io/<owner>/dea-capture` for linux/amd64 on every push to `main` that
 touches `processor/`, after `deploy/smoke-page.py` passes inside the image:
-the browser can't reach a server on loopback, and a real page captures. One
-page capture at a time wants about 2 CPUs and 2 GiB of memory, and up to
-1 GiB in `/tmp`.
+the browser and yt-dlp can't reach a server on loopback, and a real page
+captures. One page capture at a time wants about 2 CPUs and 2 GiB of memory,
+and up to 1 GiB in `/tmp`; one media capture up to about 6 GiB in `/tmp`
+while it merges a 3 GiB post.
 
 Courier never restarts a crashed plugin, and the process keeps looking
 healthy. Use `dea-capture healthcheck` as the liveness probe. It fails

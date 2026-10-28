@@ -10,10 +10,11 @@
 #   watch-page, page-builder, capture-page
 #                   the same for captures/due/page/: the page loads in
 #                   browsertrix-crawler behind dea-capture's guarding proxy
+#   watch-media, media-builder, capture-media
+#                   the same for captures/due/media/: yt-dlp, behind the same
+#                   proxy, writing to /tmp and streaming the file to R2
 #
 # Each builder takes only its own monitor's keys, by the monitor's hostname.
-# Media captures queue under captures/due/media/ and wait there until their
-# stage exists.
 #
 # Credentials and the R2 endpoint come from the environment (AWS_ACCESS_KEY_ID,
 # AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL), never from this file. On restart the
@@ -141,4 +142,42 @@ spec:
           max_workers: 1
           # the crawl is killed after 7 minutes; this leaves time to upload
           timeout_seconds: 900
+          log_to_logger: true
+    - watch-media:
+        kind: data_monitor
+        name: s3_due_poller
+        config:
+          bucket: newsletter-archive
+          prefix: captures/due/media/
+          suffix_filter: [".json"]
+          region: auto
+          poll_interval_seconds: 60
+          run_on_start: true
+          hostname: due-media
+    - media-builder:
+        kind: job_builder
+        name: filter_and_group
+        config:
+          files_per_job: 1
+          filters: {hostname: due-media}
+          targets:
+            - capture-media
+          payload:
+            media-payload:
+              kind: payload
+              name: shell_payload
+              config:
+                binary: dea-capture
+                prefix_args:
+                  - capture
+                  - "{{ files[0].file }}"
+    - capture-media:
+        kind: dispatcher
+        name: local_dispatcher
+        config:
+          # one post at a time: up to 3 GiB of parts, and the merged file, on /tmp
+          max_workers: 1
+          # yt-dlp is killed after 5 minutes probing and 90 downloading; this
+          # leaves time to upload 3 GiB
+          timeout_seconds: 7200
           log_to_logger: true
