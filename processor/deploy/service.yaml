@@ -13,6 +13,9 @@
 #   watch-media, media-builder, capture-media
 #                   the same for captures/due/media/: yt-dlp, behind the same
 #                   proxy, writing to /tmp and streaming the file to R2
+#   watch-gallery, gallery-builder, capture-gallery
+#                   the same for captures/due/gallery/: one social media post
+#                   with gallery-dl, behind the same proxy
 #
 # Each builder takes only its own monitor's keys, by the monitor's hostname.
 #
@@ -180,4 +183,41 @@ spec:
           # yt-dlp is killed after 5 minutes probing and 90 downloading; this
           # leaves time to upload 3 GiB
           timeout_seconds: 7200
+          log_to_logger: true
+    - watch-gallery:
+        kind: data_monitor
+        name: s3_due_poller
+        config:
+          bucket: newsletter-archive
+          prefix: captures/due/gallery/
+          suffix_filter: [".json"]
+          region: auto
+          poll_interval_seconds: 60
+          run_on_start: true
+          hostname: due-gallery
+    - gallery-builder:
+        kind: job_builder
+        name: filter_and_group
+        config:
+          files_per_job: 1
+          filters: {hostname: due-gallery}
+          targets:
+            - capture-gallery
+          payload:
+            gallery-payload:
+              kind: payload
+              name: shell_payload
+              config:
+                binary: dea-capture
+                prefix_args:
+                  - capture
+                  - "{{ files[0].file }}"
+    - capture-gallery:
+        kind: dispatcher
+        name: local_dispatcher
+        config:
+          # one post at a time, so each site sees one reader
+          max_workers: 1
+          # gallery-dl is killed after 30 minutes; this leaves time to upload
+          timeout_seconds: 3600
           log_to_logger: true

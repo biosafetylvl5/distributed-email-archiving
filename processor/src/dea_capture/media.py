@@ -31,6 +31,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from importlib import metadata
@@ -128,17 +129,27 @@ def _env(workdir: Path) -> dict[str, str]:
 
 
 def _run(
-    args: list[str], workdir: Path, log: str, timeout: float, stdout: Path | None
-) -> int | None:
+    args: list[str], workdir: Path, log: str, timeout: float, stdout: Path | None,
+    stop: Callable[[], bool] | None = None,
+) -> int | None:  # fmt: skip
+    """Run a downloader in its own process group, with the environment
+    stripped of credentials and its log in ``workdir``. Returns its exit code,
+    or None if it was killed: at ``timeout``, or when ``stop`` (checked every
+    few seconds) says so."""
+    deadline = time.monotonic() + timeout
     with (workdir / log).open("wb") as err, (stdout or Path(os.devnull)).open("wb") as out:
         proc = subprocess.Popen(
             args, stdin=subprocess.DEVNULL, stdout=out, stderr=err, cwd=workdir,
             env=_env(workdir), start_new_session=True,
         )  # fmt: skip
-        try:
-            code: int | None = proc.wait(timeout)
-        except subprocess.TimeoutExpired:
-            code = None
+        code: int | None = None
+        while (left := deadline - time.monotonic()) > 0:
+            try:
+                code = proc.wait(min(left, 2.0) if stop else left)
+                break
+            except subprocess.TimeoutExpired:
+                if stop and stop():
+                    break
         _end_group(proc.pid)
     return code
 
@@ -147,9 +158,10 @@ _ERROR = re.compile(r"^ERROR: (.*)$", re.M)
 _URL = re.compile(r"https?://\S+")
 
 
-def _last_error(workdir: Path, log: str) -> str | None:
+def _last_error(workdir: Path, log: str, pattern: re.Pattern[str] = _ERROR) -> str | None:
+    """The log's last error line, with its URLs masked."""
     try:
-        found = _ERROR.findall((workdir / log).read_text(errors="replace"))
+        found = pattern.findall((workdir / log).read_text(errors="replace"))
     except OSError:
         return None
     return _URL.sub("<url>", found[-1])[:300] if found else None
@@ -237,6 +249,7 @@ _TYPES = {
     ".mp4": "video/mp4", ".mkv": "video/x-matroska", ".webm": "video/webm",
     ".m4a": "audio/mp4", ".mp3": "audio/mpeg", ".opus": "audio/ogg", ".ogg": "audio/ogg",
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp",
+    ".gif": "image/gif", ".avif": "image/avif", ".heic": "image/heic", ".mov": "video/quicktime",
 }  # fmt: skip
 
 

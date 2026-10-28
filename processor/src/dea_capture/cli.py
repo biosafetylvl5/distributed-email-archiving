@@ -19,7 +19,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import __version__, capture, health, media, page
+from . import __version__, capture, gallery, health, media, page
 from .fetch import HttpFetcher
 from .guard import GuardedFetcher, IPNetwork
 from .inventory import Inventory, inventory
@@ -114,6 +114,7 @@ def _cmd_capture(args: argparse.Namespace) -> int:
         wayback_fetcher=None if args.no_wayback else fetcher,
         page_crawler=_page_crawler(blocked),
         media_grabber=_media_grabber(blocked),
+        gallery_collector=_gallery_collector(blocked),
     )  # fmt: skip
     print(result.line())
     return 0
@@ -133,16 +134,25 @@ def _media_grabber(blocked: list[IPNetwork]) -> capture.MediaGrabber:
     return lambda url, keep: media.grab_media(url, grabber, keep, blocked)
 
 
+def _gallery_collector(blocked: list[IPNetwork]) -> capture.MediaGrabber:
+    def collector(url: str, workdir: Path) -> gallery.Haul:
+        return gallery.run_gallerydl(url, workdir, GuardProxy(extra_blocked=blocked))
+
+    return lambda url, keep: gallery.collect(url, collector, keep, blocked)
+
+
 def _cmd_media(args: argparse.Namespace) -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     at = datetime.now(UTC).isoformat(timespec="seconds")
-    got = _media_grabber(_extra_blocked())(
-        args.url, lambda g: media.store_media(LocalStore(out), "", args.url, g, at)
-    )
+    blocked = _extra_blocked()
+    grab, keep = (
+        (_gallery_collector(blocked), gallery.store_gallery) if args.gallery
+        else (_media_grabber(blocked), media.store_media)
+    )  # fmt: skip
+    got = grab(args.url, lambda g: keep(LocalStore(out), "", args.url, g, at))
     summary = {
-        "outcome": got.outcome, "error": got.error,
-        "files": {name: path.name for name, path in got.files.items()},
+        "outcome": got.outcome, "error": got.error, "files": sorted(got.files),
         "duration": got.info.get("duration"), "format": got.info.get("format"), **got.details,
     }  # fmt: skip
     print(json.dumps(summary))
@@ -252,7 +262,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     p.add_argument("url", metavar="URL")
     p.add_argument("--out", metavar="DIR", required=True)
-    p.set_defaults(func=_cmd_media)
+    p.set_defaults(func=_cmd_media, gallery=False)
+
+    p = sub.add_parser(
+        "gallery",
+        help="capture one social media post with gallery-dl, into a local directory",
+        description=(
+            "Collect URL's post with gallery-dl behind the guarding proxy and write "
+            "files/001.<ext>..., info.json and capture.json to --out DIR. Prints a "
+            "summary with no URLs."
+        ),
+    )
+    p.add_argument("url", metavar="URL")
+    p.add_argument("--out", metavar="DIR", required=True)
+    p.set_defaults(func=_cmd_media, gallery=True)
 
     p = sub.add_parser("healthcheck", help="liveness probe for the courier service")
     p.add_argument("--metrics", default="http://127.0.0.1:8000/metrics")

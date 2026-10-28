@@ -32,13 +32,14 @@ from urllib.parse import urlencode, urlsplit
 from . import __version__
 from .classify import tracking_vendor
 from .fetch import FetchError, HostPacer, TooLarge, follow
+from .gallery import store_gallery
 from .guard import ForbiddenFetch, GuardedFetcher
 from .media import MediaOutcome, store_media
 from .page import PageOutcome, store_page
 from .store import Store, ext_for, put_json
 
-Kind = Literal["page", "direct", "media"]
-KINDS: tuple[Kind, ...] = ("page", "direct", "media")
+Kind = Literal["page", "direct", "media", "gallery"]
+KINDS: tuple[Kind, ...] = ("page", "direct", "media", "gallery")
 Status = Literal["queued", "retrying", "ok", "failed", "refused", "deferred"]
 FINAL: frozenset[str] = frozenset({"ok", "failed", "refused", "deferred"})
 
@@ -49,10 +50,15 @@ RETRY_AFTER = (
     timedelta(days=30),
 )  # fmt: skip
 # longer than any stage's courier timeout
-LEASE = {"page": timedelta(hours=1), "direct": timedelta(hours=1), "media": timedelta(hours=6)}
+LEASE = {
+    "page": timedelta(hours=1), "direct": timedelta(hours=1), "media": timedelta(hours=6),
+    "gallery": timedelta(hours=2),
+}  # fmt: skip
 
 _STAMP = "%Y%m%dT%H%M%SZ"
-_DUE_RE = re.compile(r"^captures/due/(page|direct|media)/(\d{8}T\d{6}Z)-([0-9a-f]{64})\.json$")
+_DUE_RE = re.compile(
+    r"^captures/due/(page|direct|media|gallery)/(\d{8}T\d{6}Z)-([0-9a-f]{64})\.json$"
+)
 
 MEDIA_HOSTS = frozenset(
     {
@@ -60,6 +66,28 @@ MEDIA_HOSTS = frozenset(
         "vimeo.com", "player.vimeo.com", "soundcloud.com", "www.tiktok.com",
     }
 )  # fmt: skip
+# one post on a site gallery-dl reads without an account: (hosts, path)
+GALLERY_POSTS = (
+    ({"x.com", "www.x.com", "mobile.x.com", "twitter.com", "www.twitter.com",
+      "mobile.twitter.com"}, re.compile(r"^/[^/]+/status/\d+")),
+    ({"bsky.app"}, re.compile(r"^/profile/[^/]+/post/[^/]+")),
+    ({"www.instagram.com", "instagram.com"}, re.compile(r"^/(?:[^/]+/)?(?:p|reel|tv)/[^/]+")),
+    ({"www.facebook.com", "facebook.com", "m.facebook.com"},
+     re.compile(r"^/(?:photo(?:\.php)?/?$|media/set/?$|[^/]+/(?:posts|photos)/)")),
+    ({"www.flickr.com", "flickr.com"}, re.compile(r"^/photos/[^/]+/\d+")),
+    ({"imgur.com"}, re.compile(r"^/(?:a|gallery)/[^/]+")),
+)  # fmt: skip
+_TUMBLR_POST = re.compile(r"^/post/\d+")
+
+
+def gallery_post(url: str) -> bool:
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if host.endswith(".tumblr.com") and _TUMBLR_POST.match(parts.path):
+        return True
+    return any(host in hosts and path.match(parts.path) for hosts, path in GALLERY_POSTS)
+
+
 _DIRECT_EXT = re.compile(
     r"\.(pdf|png|jpe?g|gif|webp|avif|svg|ico|zip|gz|epub|mobi|txt|csv|ics|vcf|docx?|xlsx?|pptx?|odt)$",
     re.IGNORECASE,
@@ -101,6 +129,8 @@ def guess_kind(url: str, content_type: str | None = None) -> Kind:
     """Which stage captures ``url``. A guess from the URL; a capture-direct
     that gets HTML back hands the URL on to capture-page."""
     parts = urlsplit(url)
+    if gallery_post(url):
+        return "gallery"
     if (parts.hostname or "").lower() in MEDIA_HOSTS:
         return "media"
     if content_type:
@@ -215,10 +245,12 @@ def run(
     wayback_fetcher: GuardedFetcher | None = None,
     page_crawler: Callable[[str], PageOutcome] | None = None,
     media_grabber: MediaGrabber | None = None,
+    gallery_collector: MediaGrabber | None = None,
 ) -> CaptureResult:
     """Run the capture a due key asks for. Page keys need ``page_crawler``,
     which takes the canonical URL (see ``page.crawl_page``); media keys need
-    ``media_grabber`` (see ``media.grab_media``)."""
+    ``media_grabber`` (see ``media.grab_media``), and gallery keys
+    ``gallery_collector`` (see ``gallery.collect``)."""
     kind, _, h = parse_due_key(key)
     pacer = pacer or HostPacer()
     data = store.get(index_key(h))
@@ -243,7 +275,17 @@ def run(
         save(store, rec)
         store.delete(key)
         return CaptureResult(h, kind, "refused", rec.status, len(rec.attempts))
-    if (kind == "page" and page_crawler is None) or (kind == "media" and media_grabber is None):
+    if (kind == "page" and gallery_post(rec.canonical)
+            and not any(a.rerouted_to == "page" for a in rec.attempts)):  # fmt: skip
+        # queued as a page before there was a gallery stage; one that stage
+        # (or another) handed on to capture-page stays here
+        rec.kind = "gallery"
+        rec.due = _due(store, rec.kind, now, h)
+        save(store, rec)
+        store.delete(key)
+        return CaptureResult(h, kind, "rerouted", rec.status, len(rec.attempts))
+    stages = {"page": page_crawler, "media": media_grabber, "gallery": gallery_collector}
+    if kind in stages and stages[kind] is None:
         raise NotImplementedError(f"no {kind} capture stage here")
 
     # take a lease: if this process dies, the lease falls due and it runs again
@@ -258,6 +300,9 @@ def run(
     elif kind == "media":
         assert media_grabber is not None
         attempt = capture_media(store, rec, media_grabber, now)
+    elif kind == "gallery":
+        assert gallery_collector is not None
+        attempt = capture_media(store, rec, gallery_collector, now, store_gallery)
     else:
         attempt = capture_direct(store, rec, fetcher, pacer, now)
     rec.attempts.append(attempt)
@@ -361,11 +406,14 @@ MediaGrabber = Callable[[str, Callable[[MediaOutcome], None]], MediaOutcome]
 
 
 def capture_media(
-    store: Store, rec: CaptureRecord, grabber: MediaGrabber, now: datetime
-) -> Attempt:
+    store: Store, rec: CaptureRecord, grabber: MediaGrabber, now: datetime,
+    keep: Callable[..., None] = store_media,
+) -> Attempt:  # fmt: skip
+    """capture-media, or capture-gallery with ``keep=store_gallery``: both hand
+    anything they can't take to capture-page."""
     at = _iso(now)
     folder = capture_dir(rec.h, now)
-    got = grabber(rec.canonical, lambda g: store_media(store, folder, rec.canonical, g, at))
+    got = grabber(rec.canonical, lambda g: keep(store, folder, rec.canonical, g, at))
     if got.outcome == "ok":
         return Attempt(at, "ok", capture=folder)
     if got.outcome == "rerouted":

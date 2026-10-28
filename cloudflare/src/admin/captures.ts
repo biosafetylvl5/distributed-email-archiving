@@ -47,7 +47,7 @@ export interface ArchivedMessage {
   capture: IssueCapture | null; // null: not processed yet
 }
 
-export const URL_KINDS = ["page", "direct", "media"] as const;
+export const URL_KINDS = ["page", "direct", "media", "gallery"] as const;
 export type UrlKind = (typeof URL_KINDS)[number];
 export const URL_STATUSES = ["queued", "retrying", "ok", "failed", "refused", "deferred"] as const;
 export type UrlStatus = (typeof URL_STATUSES)[number];

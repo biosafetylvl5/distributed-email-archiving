@@ -299,7 +299,7 @@ ${t.links_resolved} redirects followed, ${t.links_unresolved} couldn't be, ${t.l
 <span class="muted">· new mail is picked up within about 5 minutes</span></td></tr></table>`;
 }
 
-const URL_KIND_LABELS = { page: "Pages", direct: "Files", media: "Media" } as const;
+const URL_KIND_LABELS = { page: "Pages", direct: "Files", media: "Media", gallery: "Social posts" } as const;
 
 function urlTable(u: UrlCaptures): Html {
   if (u.total === 0) return html`<span class="muted">none queued yet</span>`;
@@ -309,7 +309,7 @@ function urlTable(u: UrlCaptures): Html {
 ${URL_KINDS.map(
     (k) => html`<tr><th>${URL_KIND_LABELS[k]}</th>${cols.map((s) => html`<td>${u.byKind[k][s] || html`<span class="muted">0</span>`}</td>`)}</tr>`,
   )}</table>
-<span class="muted">Media capture isn't running yet; those URLs wait in their queue. Pages are captured one at a time.</span>`;
+<span class="muted">Each kind is captured one at a time: pages in a browser, media with yt-dlp, social posts with gallery-dl.</span>`;
 }
 
 const CAPTURE_STATES = ["all", "partial", "pending", "done"] as const;

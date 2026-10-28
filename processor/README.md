@@ -14,8 +14,10 @@ and are tested. The `issue` stage stores every embed of each archived
 message, then resolves its links and queues each landing page once.
 `capture` stores direct downloads (PDFs, images, files), pages, which it
 loads in [browsertrix-crawler](https://github.com/webrecorder/browsertrix-crawler),
-and video and audio posts, which it downloads with
-[yt-dlp](https://github.com/yt-dlp/yt-dlp), both behind a guarding proxy. It
+video and audio posts, which it downloads with
+[yt-dlp](https://github.com/yt-dlp/yt-dlp), and social media posts, which it
+collects with [gallery-dl](https://github.com/mikf/gallery-dl), all behind a
+guarding proxy. It
 retries failures on a schedule and falls back to the Wayback Machine. It all
 runs as a [courier](https://github.com/CIRA-GEOIPS/courier) service.
 
@@ -121,8 +123,8 @@ line of counts per message, with no URLs.
 Every canonical URL is captured once, however many messages link to it. With
 `h` = sha256 of the canonical URL:
 
-- `captures/index/<h>.json` is its record: kind (`page`, `direct` or
-  `media`), status (`queued`, `retrying`, `ok`, `failed`, `refused`,
+- `captures/index/<h>.json` is its record: kind (`page`, `direct`, `media` or
+  `gallery`), status (`queued`, `retrying`, `ok`, `failed`, `refused`,
   `deferred`), every attempt, and where the good capture is. Status, kind and
   attempt count are also its metadata, for the dashboard. It is created
   with `If-None-Match: *`, so exactly one message queues each URL.
@@ -160,6 +162,17 @@ files on disk. The folder gets `media.<ext>`, `thumbnail.<ext>`, `info.json`
 `capture.json`; files stream from disk to the store. `dea-capture media URL
 --out DIR` grabs one locally.
 
+Gallery keys are single posts on X/Twitter, Bluesky, Instagram, Facebook,
+Flickr, Tumblr and Imgur. gallery-dl collects the post's images and videos at
+their original resolution, with no account or cookies: at most 100 files and
+3 GiB. The folder gets `files/001.<ext>`... in the post's order, `info.json`
+(the post's text, author and date, and each file's metadata, with signed CDN
+URLs' query strings removed) and `capture.json`. A site that wants a login (Instagram,
+usually), or a URL gallery-dl doesn't know, moves to the `page` queue, and
+stays there. Posts queued as pages before this stage existed move to it the
+first time their page key comes due. `dea-capture gallery URL --out DIR`
+collects one locally.
+
 A link whose tracker answered without redirecting (a 429, say) stays
 unresolved: the tracker's URL carries the reader's token, so it is never
 queued, and the capture stages refuse one without requesting it.
@@ -172,19 +185,19 @@ removed, are stored under `captures/`.
 `deploy/service.yaml` is the courier service. An S3 poller on
 `incoming/archive/` makes one job per `.eml` for `dea-capture issue`. An
 `s3_due_poller` each on `captures/due/direct/`, `captures/due/page/` and
-`captures/due/media/` makes
+`captures/due/media/` and `captures/due/gallery/` makes
 one job per due key for `dea-capture capture`. That poller is courier's S3
 poller, except that it emits a key only once the time in its name has passed. It comes with this
 package as a courier plugin. The service needs `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY` and `AWS_ENDPOINT_URL` (the R2 S3 endpoint) in the environment. The object
-key is passed as its own argument, never through a shell. The crawler and
-yt-dlp get the environment without the `AWS_*` credentials.
+key is passed as its own argument, never through a shell. The crawler,
+yt-dlp and gallery-dl get the environment without the `AWS_*` credentials.
 
 The `Dockerfile` builds it on the browsertrix-crawler image, with courier
 pinned to a commit (the `service` extra). GitHub Actions publishes
 `ghcr.io/<owner>/dea-capture` for linux/amd64 on every push to `main` that
 touches `processor/`, after `deploy/smoke-page.py` passes inside the image:
-the browser and yt-dlp can't reach a server on loopback, and a real page
+the browser, yt-dlp and gallery-dl can't reach a server on loopback, and a real page
 captures. One page capture at a time wants about 2 CPUs and 2 GiB of memory,
 and up to 1 GiB in `/tmp`; one media capture up to about 6 GiB in `/tmp`
 while it merges a 3 GiB post.

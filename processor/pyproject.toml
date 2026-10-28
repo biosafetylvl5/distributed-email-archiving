@@ -19,6 +19,8 @@ service = [
     # capture-media; pinned, and bumped when sites change under it. "default"
     # brings the YouTube challenge solver, which runs on the image's node.
     "yt-dlp[default]==2026.10.26",
+    # capture-gallery; pinned and bumped the same way
+    "gallery-dl==1.32.18",
 ]
 
 [project.scripts]

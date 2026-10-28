@@ -1,4 +1,5 @@
-"""Smoke test for capture-page and capture-media, run inside the built image by CI.
+"""Smoke test for capture-page, capture-media and capture-gallery, run inside
+the built image by CI.
 
 1. The browser can't reach loopback: crawl a server on 127.0.0.1 (skipping
    crawl_page's own check, so only the proxy stands in the way) and expect
@@ -8,6 +9,7 @@
 3. capture-media's tools run (yt-dlp, ffmpeg, node), and yt-dlp can't reach
    loopback either. Then a short public video is grabbed; CI's addresses are
    often refused by video sites, so that part only reports what happened.
+4. gallery-dl runs and can't reach loopback.
 
     docker run --rm --read-only --tmpfs /tmp --user 1000 \\
       -v "$PWD/processor/deploy/smoke-page.py:/smoke.py:ro" IMAGE python3 /smoke.py
@@ -23,7 +25,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from dea_capture import media, page
+from dea_capture import gallery, media, page
 from dea_capture.proxy import GuardProxy
 
 hits: list[str] = []
@@ -85,8 +87,8 @@ assert got.files["page.wacz"][:2] == b"PK"
 assert got.files["screenshot.png"][:8] == b"\x89PNG\r\n\x1a\n"
 assert got.info["proxy"]["tunnels"] > 0
 
-for tool in ([sys.executable, "-m", "yt_dlp", "--version"], ["ffmpeg", "-version"],
-             ["node", "--version"]):  # fmt: skip
+for tool in ([sys.executable, "-m", "yt_dlp", "--version"], [sys.executable, "-m", "gallery_dl",
+             "--version"], ["ffmpeg", "-version"], ["node", "--version"]):  # fmt: skip
     out = subprocess.run(tool, capture_output=True, text=True, check=True).stdout
     print(tool[-2] if tool[0] == sys.executable else tool[0], out.splitlines()[0][:80])
 
@@ -114,5 +116,14 @@ video = media.grab_media("https://www.youtube.com/watch?v=jNQXAC9IVRw", grabber,
 print("youtube (informational)", json.dumps({"outcome": video.outcome, "error": video.error,
                                              "files": kept, "format": video.info.get("format"),
                                              **video.details}))  # fmt: skip
+before = len(hits)
+with tempfile.TemporaryDirectory() as tmp:
+    proxy = GuardProxy()
+    h = gallery.run_gallerydl(local_url + "a/b", Path(tmp), proxy)
+    print("gallery loopback", json.dumps({"exit": h.exit_code, "hits": len(hits) - before,
+                                          "refused": dict(proxy.stats.refused)}))  # fmt: skip
+assert len(hits) == before, "gallery-dl reached loopback"
+assert h.post is None and not h.files, "gallery-dl got something from loopback"
+
 print("smoke ok")
 sys.exit(0)
