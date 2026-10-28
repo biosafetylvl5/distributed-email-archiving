@@ -119,11 +119,12 @@ print("youtube (informational)", json.dumps({"outcome": video.outcome, "error": 
 before = len(hits)
 with tempfile.TemporaryDirectory() as tmp:
     proxy = GuardProxy()
-    h = gallery.run_gallerydl(local_url + "a/b", Path(tmp), proxy)
+    # an image URL, which gallery-dl's directlink extractor would fetch
+    h = gallery.run_gallerydl(local_url + "image.jpg", Path(tmp), proxy)
     print("gallery loopback", json.dumps({"exit": h.exit_code, "hits": len(hits) - before,
                                           "refused": dict(proxy.stats.refused)}))  # fmt: skip
 assert len(hits) == before, "gallery-dl reached loopback"
-assert h.post is None and not h.files, "gallery-dl got something from loopback"
+assert not h.files and proxy.stats.refused.get("127.0.0.1"), "the proxy didn't refuse gallery-dl"
 
 print("smoke ok")
 sys.exit(0)
