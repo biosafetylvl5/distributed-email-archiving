@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .capture import Kind, guess_kind, queue, url_hash
-from .classify import Decision
+from .classify import Decision, tracking_vendor
 from .fetch import HostPacer
 from .guard import GuardedFetcher
 from .inventory import Inventory
@@ -103,6 +103,10 @@ def process_links(
             rec.canonical, rec.http_status = r.canonical, r.http_status
             rec.stopped_at_auth = r.stopped_at_auth
             content_type = r.content_type
+        if rec.canonical and tracking_vendor(rec.canonical):
+            # a tracker's URL holds the reader's token: never shared, never requested again
+            rec.outcome, rec.canonical = "failed", None
+            rec.error = rec.error or "resolved to a tracker URL"
         if rec.canonical:
             rec.h = url_hash(rec.canonical)
             rec.kind = guess_kind(rec.canonical, content_type)

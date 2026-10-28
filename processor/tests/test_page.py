@@ -47,7 +47,9 @@ def _warc(records: list[tuple[str, str, bytes]]) -> bytes:
     return out.getvalue()
 
 
-def make_wacz(path: Path, pages: list[dict[str, Any]], shot: bytes | None = PNG) -> Path:
+def make_wacz(
+    path: Path, pages: list[dict[str, Any]], shot: bytes | None = PNG, final: str | None = None
+) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w") as z:
         lines = [{"format": "json-pages-1.0", "id": "pages"}, *pages]
@@ -57,6 +59,9 @@ def make_wacz(path: Path, pages: list[dict[str, Any]], shot: bytes | None = PNG)
             records = [("resource", f"urn:thumbnail:{URL}", b"thumb"),
                        ("resource", f"urn:view:{URL}", shot)]  # fmt: skip
             z.writestr("archive/screenshots-1.warc.gz", _warc(records))
+        if final is not None:
+            z.writestr("archive/text-1.warc.gz",
+                       _warc([("resource", f"urn:textFinal:{URL}", final.encode())]))  # fmt: skip
     return path
 
 
@@ -89,10 +94,14 @@ def test_crawl_args_keep_the_browser_behind_the_proxy(tmp_path: Path) -> None:
 def test_read_wacz(tmp_path: Path) -> None:
     other = _page(url="https://news.example.org/other", seed=False)
     w = make_wacz(tmp_path / "x.wacz", [other, _page()])
-    entry, shot = read_wacz(w, URL)
-    assert entry is not None and entry["title"] == "Story"
-    assert shot == PNG
-    assert read_wacz(make_wacz(tmp_path / "y.wacz", [], shot=None), URL) == (None, None)
+    got = read_wacz(w, URL)
+    assert got.page is not None and got.page["title"] == "Story"
+    assert got.screenshot == PNG
+    assert got.final_text is None
+    empty = read_wacz(make_wacz(tmp_path / "y.wacz", [], shot=None), URL)
+    assert (empty.page, empty.screenshot) == (None, None)
+    assert read_wacz(make_wacz(tmp_path / "z.wacz", [_page()], final="Grown text."),
+                     URL).final_text == "Grown text."  # fmt: skip
 
 
 def fake_crawler(tmp_path: Path, **crawl: Any) -> page.Crawler:
@@ -112,6 +121,14 @@ def test_crawl_page_ok(tmp_path: Path) -> None:
     assert set(got.files) == {"page.wacz", "screenshot.png", "text.txt"}
     assert got.info["limit_hit"] == "time limit"
     assert got.info["title"] == "Story"
+    assert (got.files["text.txt"], got.info["text_from"]) == (b"The story text.", "load")
+
+
+def test_crawl_page_prefers_the_final_text(tmp_path: Path) -> None:
+    w = make_wacz(tmp_path / "x.wacz", [_page()])
+    got = crawl_page(URL, fake_crawler(tmp_path, wacz=w, page=_page(text=""),
+                                       final_text="Loaded later."))  # fmt: skip
+    assert (got.files["text.txt"], got.info["text_from"]) == (b"Loaded later.", "final")
 
 
 @pytest.mark.parametrize(

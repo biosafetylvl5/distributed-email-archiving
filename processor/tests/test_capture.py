@@ -21,11 +21,13 @@ from dea_capture.capture import (
     url_hash,
     wayback_raw,
 )
+from dea_capture.classify import tracking_vendor
 from dea_capture.fetch import HostPacer, TooLarge
 from dea_capture.guard import GuardedFetcher, IPAddress, Response
 from dea_capture.inventory import Inventory
 from dea_capture.issue import process_issue, status_key
 from dea_capture.links import captures_key
+from dea_capture.page import PageOutcome
 from dea_capture.resolve import resolve
 from dea_capture.store import LocalStore
 
@@ -44,6 +46,8 @@ class Web:
     bodies: dict[str, tuple[str, bytes]] = field(default_factory=dict)
     huge: set[str] = field(default_factory=set)
     requested: list[str] = field(default_factory=list)
+    # trackers not in ``redirects`` send the click to a landing page of their own
+    trackers_land: bool = False
 
     def get(self, url: str, *, addresses: Sequence[IPAddress]) -> Response:
         assert not any(m in url for m in FORBIDDEN_MARKERS), url
@@ -52,6 +56,9 @@ class Web:
             raise TooLarge(10)
         if url in self.redirects:
             return Response(url, 302, {"location": self.redirects[url]}, b"")
+        if self.trackers_land and tracking_vendor(url):
+            land = f"https://www.example.org/landing/{url_hash(url)[:12]}"
+            return Response(url, 302, {"location": land}, b"")
         ctype, body = self.bodies.get(url, ("text/html", b"<html></html>"))
         return Response(url, self.status.get(url, 200), {"content-type": ctype}, body)
 
@@ -99,6 +106,19 @@ def test_resolve_refuses_a_hop_onto_unsubscribe() -> None:
     r = resolve(a, _guarded(web), HostPacer(0))
     assert r.outcome == "refused" and r.canonical is None
     assert web.requested == [a]
+
+
+@pytest.mark.parametrize("status", [200, 403, 429])
+def test_a_tracker_that_does_not_redirect_is_never_the_canonical(status: int) -> None:
+    a = "https://substack.com/redirect/3f2a-uuid?j=eyJ1IjoxfQ.sig"
+    web = Web(status={a: status})
+    r = resolve(a, _guarded(web), HostPacer(0))
+    assert (r.outcome, r.canonical, r.final, r.http_status) == ("failed", None, None, status)
+    # nor is a tracker further down the chain
+    b = "https://click.example.com/r/9"
+    web = Web(redirects={a: b}, status={b: 429})
+    r = resolve(a, _guarded(web), HostPacer(0))
+    assert (r.outcome, r.canonical) == ("failed", None)
 
 
 def test_resolve_reports_loops_and_long_chains() -> None:
@@ -174,6 +194,24 @@ def test_direct_capture_stores_body_and_headers(tmp_path: Path) -> None:
     store.put(key, b"{}", "application/json")
     assert run(store, key, _guarded(web), now=T0, pacer=HostPacer(0)).outcome == "stale"
     assert web.requested == [PDF]
+
+
+@pytest.mark.parametrize("kind", ["direct", "page"])
+def test_a_queued_tracker_url_is_refused_unrequested(tmp_path: Path, kind: str) -> None:
+    tracker = "https://substack.com/redirect/3f2a-uuid?j=eyJ1IjoxfQ.sig"
+    store = LocalStore(tmp_path)
+    queue(store, tracker, kind, T0)  # type: ignore[arg-type]
+    web, wayback = Web(), Web()
+
+    def crawler(url: str) -> PageOutcome:
+        raise AssertionError(url)
+
+    key = due_key(kind, T0, url_hash(tracker))  # type: ignore[arg-type]
+    result = run(store, key, _guarded(web), now=T0, pacer=HostPacer(0),
+                 wayback_fetcher=_guarded(wayback), page_crawler=crawler)  # fmt: skip
+    assert (result.outcome, result.status) == ("refused", "refused")
+    assert (web.requested, wayback.requested) == ([], [])
+    assert _due_keys(tmp_path) == []
 
 
 def test_failures_retry_on_the_schedule_then_fall_back_to_wayback(tmp_path: Path) -> None:
@@ -265,7 +303,7 @@ def test_links_are_resolved_and_queued(path: Path, tmp_path: Path) -> None:
     raw = path.read_bytes()
     sha = hashlib.sha256(raw).hexdigest()
     store = LocalStore(tmp_path)
-    web = Web()
+    web = Web(trackers_land=True)
     result = _issue(raw, store, web, make_resolver=lambda inv: _guarded(web, inv.refused_urls()))
     doc = json.loads(store.get(captures_key(sha)) or b"")
     assert doc["links"], "fixture should have links to capture"
@@ -273,6 +311,8 @@ def test_links_are_resolved_and_queued(path: Path, tmp_path: Path) -> None:
     assert hashes
     for h in hashes:
         assert store.exists(index_key(h))
+    # a tracker that answers without redirecting is unresolved, not queued
+    assert not [r for r in doc["links"] if r["canonical"] and tracking_vendor(r["canonical"])]
     status = store.metadata(status_key(sha)) or {}
     assert status["links_state"] in {"done", "partial"}
     assert int(status["captures_queued"]) == len(hashes)

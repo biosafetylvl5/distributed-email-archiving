@@ -10,6 +10,10 @@ A hop that carries an auth parameter is never requested: it would log the
 reader in. The chain stops there, and the landing page is its canonical URL,
 which the capture stage requests logged out.
 
+A chain that ends on a tracker (one that answered 429, 403 or an
+interstitial page instead of redirecting) has failed: the tracker's URL
+carries the reader's token, and is never a canonical URL.
+
 The chain holds the original, tokenized hrefs, so a ``Resolution`` belongs in
 the issue's private files only.
 """
@@ -20,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 from urllib.parse import urljoin
 
-from .classify import canonicalize, has_auth_param
+from .classify import canonicalize, has_auth_param, tracking_vendor
 from .fetch import REDIRECTS, FetchError, HostPacer
 from .guard import ForbiddenFetch, GuardedFetcher
 
@@ -62,6 +66,11 @@ def resolve(
         except FetchError as exc:
             return Resolution("failed", chain, error=str(exc))
         location = resp.headers.get("location")
+        if (resp.status not in REDIRECTS or not location) and tracking_vendor(url):
+            return Resolution(
+                "failed", chain, http_status=resp.status,
+                error=f"tracker answered HTTP {resp.status} without redirecting",
+            )  # fmt: skip
         if resp.status not in REDIRECTS or not location:
             return Resolution(
                 "ok", chain, url, canonicalize(url), resp.status,

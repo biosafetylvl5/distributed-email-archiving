@@ -30,6 +30,7 @@ from typing import Any, Literal
 from urllib.parse import urlencode, urlsplit
 
 from . import __version__
+from .classify import tracking_vendor
 from .fetch import FetchError, HostPacer, TooLarge, follow
 from .guard import ForbiddenFetch, GuardedFetcher
 from .page import PageOutcome, store_page
@@ -230,6 +231,14 @@ def run(
         save(store, rec)
         store.delete(key)
         return CaptureResult(h, kind, "rerouted", rec.status, len(rec.attempts))
+    if tracking_vendor(rec.canonical):
+        # a click-tracker's URL carries the reader's token: never requested,
+        # here or at the Wayback Machine (older resolves could queue one)
+        rec.attempts.append(Attempt(_iso(now), "refused", error="click-tracker URL"))
+        rec.status, rec.due, rec.updated_at = "refused", None, _iso(now)
+        save(store, rec)
+        store.delete(key)
+        return CaptureResult(h, kind, "refused", rec.status, len(rec.attempts))
     if kind == "media" or (kind == "page" and page_crawler is None):
         raise NotImplementedError(f"no {kind} capture stage here")
 

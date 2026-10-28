@@ -4,7 +4,8 @@ The crawler loads the canonical URL alone (no other pages, no links followed)
 in its own browser, runs its scroll and autoplay behaviours, and writes a
 WACZ. Its browser and its own downloads go through ``GuardProxy``, so they
 reach public addresses only. From the WACZ this keeps the page's entry
-(status, title, extracted text) and the viewport screenshot.
+(status, title), the text as it stood after the behaviours ran (or at load,
+when that didn't change), and the viewport screenshot.
 
 Stored in the attempt's folder under ``captures/<h[:2]>/<h>/<stamp>/``:
 ``page.wacz``, ``screenshot.png`` and ``text.txt`` when there are any, and
@@ -59,6 +60,7 @@ class Crawl:
     wacz: Path | None
     page: dict[str, Any] | None  # the URL's entry in the WACZ's pages.jsonl
     screenshot: bytes | None
+    final_text: str | None = None  # after the behaviours; None if unchanged from load
     stats: ProxyStats = field(default_factory=ProxyStats)
 
 
@@ -68,7 +70,7 @@ Crawler = Callable[[str, Path], Crawl]
 def crawl_args(url: str, workdir: Path, proxy_port: int, user_agent_suffix: str) -> list[str]:
     return [
         CRAWL, "--url", url, "--scopeType", "page", "--limit", "1", "--workers", "1",
-        "--headless", "--generateWACZ", "--screenshot", "view", "--text", "to-pages",
+        "--headless", "--generateWACZ", "--screenshot", "view", "--text", "to-pages,final-to-warc",
         "--collection", COLLECTION, "--cwd", str(workdir), "--saveState", "never",
         "--pageLoadTimeout", str(PAGE_LOAD_TIMEOUT), "--behaviorTimeout", str(BEHAVIOR_TIMEOUT),
         "--timeLimit", str(TIME_LIMIT), "--sizeLimit", str(SIZE_LIMIT),
@@ -146,8 +148,11 @@ def run_crawler(url: str, workdir: Path, proxy: GuardProxy, user_agent_suffix: s
     finally:
         proxy.stop()
     wacz = workdir / "collections" / COLLECTION / f"{COLLECTION}.wacz"
-    page, shot = read_wacz(wacz, url) if wacz.is_file() else (None, None)
-    return Crawl(code, wacz if wacz.is_file() else None, page, shot, proxy.stats)
+    if not wacz.is_file():
+        return Crawl(code, None, None, None, stats=proxy.stats)
+    got = read_wacz(wacz, url)
+    return Crawl(code, wacz, got.page, got.screenshot, final_text=got.final_text,
+                 stats=proxy.stats)  # fmt: skip
 
 
 def _warc_records(data: bytes) -> Iterator[tuple[dict[str, str], bytes]]:
@@ -169,10 +174,18 @@ def _warc_records(data: bytes) -> Iterator[tuple[dict[str, str], bytes]]:
         pos = end + 4 + n
 
 
-def read_wacz(path: Path, url: str) -> tuple[dict[str, Any] | None, bytes | None]:
-    """The page's pages.jsonl entry and its viewport screenshot, if there are any."""
+@dataclass
+class WaczParts:
+    page: dict[str, Any] | None = None  # the URL's pages.jsonl entry
+    screenshot: bytes | None = None
+    final_text: str | None = None
+
+
+def read_wacz(path: Path, url: str) -> WaczParts:
+    """What we keep beside the WACZ, from inside it."""
     page: dict[str, Any] | None = None
     shot: bytes | None = None
+    final: str | None = None
     with zipfile.ZipFile(path) as z:
         names = z.namelist()
         if "pages/pages.jsonl" in names:
@@ -182,13 +195,17 @@ def read_wacz(path: Path, url: str) -> tuple[dict[str, Any] | None, bytes | None
                     is_page = isinstance(entry, dict) and "url" in entry and "format" not in entry
                     if is_page and (page is None or entry.get("url") == url):
                         page = entry
+        # the crawler writes its screenshot and text records to WARCs of their own
         for name in names:
-            if shot is None and name.startswith("archive/") and "screenshot" in name:
-                for headers, block in _warc_records(z.read(name)):
-                    if headers.get("warc-target-uri", "").startswith("urn:view:"):
-                        shot = block
-                        break
-    return page, shot
+            if not name.startswith("archive/") or not ("screenshot" in name or "text" in name):
+                continue
+            for headers, block in _warc_records(z.read(name)):
+                target = headers.get("warc-target-uri", "")
+                if shot is None and target.startswith("urn:view:"):
+                    shot = block
+                elif target.startswith("urn:textFinal:"):
+                    final = block.decode("utf-8", "replace")
+    return WaczParts(page, shot, final)
 
 
 def _crawler_version() -> str:
@@ -240,13 +257,14 @@ def crawl_page(
         files: dict[str, bytes] = {"page.wacz": c.wacz.read_bytes()}
         if c.screenshot:
             files["screenshot.png"] = c.screenshot
-        text = c.page.get("text")
+        text = c.final_text if c.final_text and c.final_text.strip() else c.page.get("text")
         if isinstance(text, str) and text.strip():
             files["text.txt"] = text.encode()
         info = {
             "title": c.page.get("title"),
             "mime": c.page.get("mime"),
             "load_state": c.page.get("loadState"),
+            "text_from": "final" if c.final_text and c.final_text.strip() else "load",
             "crawler_exit": c.exit_code,
             "limit_hit": LIMIT_EXITS.get(c.exit_code or 0),
             "proxy": c.stats.to_json(),
