@@ -19,7 +19,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import __version__, capture, gallery, health, media, page
+from . import __version__, capture, gallery, health, media, page, summary
 from .fetch import HttpFetcher
 from .guard import GuardedFetcher, IPNetwork
 from .inventory import Inventory, inventory
@@ -175,6 +175,14 @@ def _cmd_page(args: argparse.Namespace) -> int:
     return 0 if got.outcome == "ok" else 1
 
 
+def _cmd_summary(args: argparse.Namespace) -> int:
+    bucket = args.bucket.removeprefix("s3://").strip("/")
+    if not bucket or "/" in bucket:
+        raise SystemExit(f"not an s3://bucket URI: {args.bucket}")
+    print(json.dumps(summary.build(S3Store(bucket))))
+    return 0
+
+
 def _cmd_healthcheck(args: argparse.Namespace) -> int:
     try:
         text = health.fetch_metrics(args.metrics)
@@ -276,6 +284,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("url", metavar="URL")
     p.add_argument("--out", metavar="DIR", required=True)
     p.set_defaults(func=_cmd_media, gallery=True)
+
+    p = sub.add_parser(
+        "summary",
+        help="rebuild the dashboard's summary object",
+        description=(
+            "List the archive, the issue status records and the capture index in "
+            "s3://BUCKET, read the metadata of what changed since the last run, and write "
+            "dashboard/summary.json for the admin Worker. Prints counts only."
+        ),
+    )
+    p.add_argument("bucket", metavar="s3://BUCKET")
+    p.set_defaults(func=_cmd_summary)
 
     p = sub.add_parser("healthcheck", help="liveness probe for the courier service")
     p.add_argument("--metrics", default="http://127.0.0.1:8000/metrics")

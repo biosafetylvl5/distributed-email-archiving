@@ -28,6 +28,7 @@ dea-capture = "dea_capture.cli:main"
 
 [project.entry-points."courier.data_monitors"]
 s3_due_poller = "dea_capture.courier_plugin:S3DuePoller"
+ticker = "dea_capture.courier_plugin:Ticker"
 
 [dependency-groups]
 dev = [

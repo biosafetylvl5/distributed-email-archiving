@@ -17,9 +17,9 @@ import {
   type Settings,
 } from "../settings";
 import { authenticate, type AuthResult } from "./auth";
-import { archiveStats, CHART_DAYS } from "./stats";
+import { CHART_DAYS } from "./stats";
+import { snapshot, type Snapshot } from "./summary";
 import {
-  captureSummary,
   URL_KINDS,
   URL_STATUSES,
   type ArchivedMessage,
@@ -150,14 +150,14 @@ function ago(d: Date | null, now: Date): string {
 async function overview(ctx: Ctx): Promise<Response> {
   const { env } = ctx;
   const now = new Date();
-  const [users, tags, { settings }, usage, stats, captures] = await Promise.all([
+  const [users, tags, { settings }, usage, snap] = await Promise.all([
     listUsers(env),
     listTags(env),
     settingsFor(env),
     usageForDay(env, today()),
-    archiveStats(env, now),
-    captureSummary(env),
+    snapshot(env, now),
   ]);
+  const { stats, captures } = snap;
   const active = users.filter((u) => u.record?.active).length;
   const byStatus = (s: string) => tags.filter((t) => t.record?.status === s).length;
   const withField = (f: "publish" | "sender_domain" | "signup_url") => tags.filter((t) => t.record?.[f]).length;
@@ -200,6 +200,7 @@ async function overview(ctx: Ctx): Promise<Response> {
 <tr><th>Receiving domain</th><td><code>${env.ARCHIVE_DOMAIN || "(any)"}</code></td></tr></table>
 
 <h2>Stored mail</h2>
+${freshness(snap, now)}
 ${partial}
 <table><tr><th></th><th>Messages</th><th>Size</th><th>Last 7 days</th><th>Last 30 days</th></tr>
 <tr><th>Archived</th><td>${t.archive.count}</td><td>${formatBytes(t.archive.bytes)}</td><td>${stats.last7.archive}</td><td>${stats.last30.archive}</td></tr>
@@ -263,6 +264,18 @@ ${usage.map((u) => html`<tr><td><code>${u.scope}</code></td><td>${u.count}</td><
 }
 
 // --- captures (dea-capture's issue-status records)
+
+// the summary is rebuilt every 5 minutes; well past that, dea-capture is likely down
+const SUMMARY_STALE_MINUTES = 30;
+
+function freshness(s: Snapshot, now: Date): Html {
+  if (!s.generatedAt) return html`<p class="muted">Counted from the bucket just now.</p>`;
+  const stale = now.getTime() - s.generatedAt.getTime() > SUMMARY_STALE_MINUTES * 60_000;
+  const when = html`<span title="${s.generatedAt.toISOString()}">${agoTime(s.generatedAt, now)}</span>`;
+  return stale
+    ? html`<p class="msg warn">These numbers were last counted ${when}. dea-capture rebuilds them every 5 minutes, so it may be down.</p>`
+    : html`<p class="muted">Counted by dea-capture ${when}; rebuilt every 5 minutes.</p>`;
+}
 
 function agoTime(d: Date | null, now: Date): string {
   if (!d) return "never";
@@ -338,7 +351,9 @@ ${c.linksState === "pending" ? html`<span class="muted">· not queued yet</span>
 }
 
 async function capturesPage(ctx: Ctx): Promise<Response> {
-  const c = await captureSummary(ctx.env);
+  const now = new Date();
+  const snap = await snapshot(ctx.env, now);
+  const c = snap.captures;
   const asked = ctx.url.searchParams.get("state") ?? "all";
   const state = (CAPTURE_STATES as readonly string[]).includes(asked) ? asked : "all";
   const shown = c.messages.filter((m) => state === "all" || (m.capture?.state ?? "pending") === state);
@@ -348,6 +363,7 @@ async function capturesPage(ctx: Ctx): Promise<Response> {
     "Captures",
     html`<p class="muted">What dea-capture stored for each archived message, newest first: embedded files and
 the link inventory. Counts only; the files themselves are in R2 under <code>issues/&lt;sha&gt;/</code>.</p>
+${freshness(snap, now)}
 ${c.partial ? html`<p class="msg warn">Only part of the archive was scanned.</p>` : ""}
 <p>${CAPTURE_STATES.map(
       (st, i) =>

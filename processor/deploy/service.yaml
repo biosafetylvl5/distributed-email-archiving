@@ -16,6 +16,9 @@
 #   watch-gallery, gallery-builder, capture-gallery
 #                   the same for captures/due/gallery/: one social media post
 #                   with gallery-dl, behind the same proxy
+#   summary-ticker, summary-builder, summary
+#                   every 5 minutes, `dea-capture summary s3://<bucket>` rewrites
+#                   dashboard/summary.json, the counts the admin dashboard shows
 #
 # Each builder takes only its own monitor's keys, by the monitor's hostname.
 #
@@ -220,4 +223,34 @@ spec:
           max_workers: 1
           # gallery-dl is killed after 30 minutes; this leaves time to upload
           timeout_seconds: 3600
+          log_to_logger: true
+    - summary-ticker:
+        kind: data_monitor
+        name: ticker
+        config:
+          interval_seconds: 300
+          hostname: summary-tick
+    - summary-builder:
+        kind: job_builder
+        name: filter_and_group
+        config:
+          files_per_job: 1
+          filters: {hostname: summary-tick}
+          targets:
+            - summary
+          payload:
+            summary-payload:
+              kind: payload
+              name: shell_payload
+              config:
+                binary: dea-capture
+                prefix_args:
+                  - summary
+                  - s3://newsletter-archive
+    - summary:
+        kind: dispatcher
+        name: local_dispatcher
+        config:
+          max_workers: 1
+          timeout_seconds: 900
           log_to_logger: true

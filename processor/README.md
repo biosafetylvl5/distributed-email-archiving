@@ -208,6 +208,13 @@ when any poller's last completed scan, from courier's metrics on port 8000,
 is older than `--max-scan-age` (default 900 s). Give it a startup probe
 with room for the first full scan.
 
+Every 5 minutes the service also runs `dea-capture summary s3://<bucket>`.
+It lists the archive, `issue-status/` and `captures/index/`, and writes
+`dashboard/summary.json`: the counts and metadata the admin dashboard shows,
+which the Worker can't afford to list itself. Only objects whose ETag changed
+since the last run get a HEAD request; what it has seen is kept in
+`dashboard/summary-state.json`. Recipient addresses and URLs are left out.
+
 ## Usage
 
 ```sh

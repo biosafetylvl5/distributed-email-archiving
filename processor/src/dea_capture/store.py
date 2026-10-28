@@ -13,9 +13,20 @@ import os
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
+
+
+@dataclass(frozen=True)
+class Listed:
+    """One object in a listing."""
+
+    key: str
+    size: int
+    etag: str  # changes whenever the object is rewritten
+    modified: datetime
 
 
 class Store(Protocol):
@@ -81,7 +92,22 @@ class LocalStore:
     def metadata(self, key: str) -> dict[str, str] | None:
         """What ``put`` was given as ``metadata``, kept beside the store."""
         path = self._meta_path(key)
-        return json.loads(path.read_text()) if path.is_file() else None
+        if path.is_file():
+            got: dict[str, str] = json.loads(path.read_text())
+            return got
+        return {} if self.exists(key) else None
+
+    def listing(self, prefix: str) -> list[Listed]:
+        root = self.root.resolve()
+        found = []
+        for path in sorted(root.rglob("*")):
+            key = path.relative_to(root).as_posix()
+            if not path.is_file() or not key.startswith(prefix) or key.startswith(".meta/"):
+                continue
+            st = path.stat()
+            found.append(Listed(key, st.st_size, f"{st.st_mtime_ns}-{st.st_size}",
+                                datetime.fromtimestamp(st.st_mtime, UTC)))  # fmt: skip
+        return found
 
     def put(
         self, key: str, data: bytes, content_type: str, *, if_absent: bool = False,
@@ -172,6 +198,27 @@ class S3Store:
 
     def delete(self, key: str) -> None:
         self.client.delete_object(Bucket=self.bucket, Key=key)
+
+    def metadata(self, key: str) -> dict[str, str] | None:
+        """The object's user metadata (R2 ``customMetadata``), or None if it's gone."""
+        from botocore.exceptions import ClientError
+
+        try:
+            head = self.client.head_object(Bucket=self.bucket, Key=key)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in {"404", "NoSuchKey", "NotFound"}:
+                return None
+            raise
+        return dict(head.get("Metadata") or {})
+
+    def listing(self, prefix: str) -> list[Listed]:
+        found = []
+        for page in self.client.get_paginator("list_objects_v2").paginate(
+            Bucket=self.bucket, Prefix=prefix
+        ):
+            for o in page.get("Contents", []):
+                found.append(Listed(o["Key"], o["Size"], o["ETag"], o["LastModified"]))
+        return found
 
 
 def ext_for(content_type: str | None, url: str) -> str:

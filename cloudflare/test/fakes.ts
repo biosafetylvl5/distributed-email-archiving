@@ -63,6 +63,7 @@ function body(o: FakeObject, bytes: Uint8Array) {
     customMetadata: o.customMetadata,
     body: new Blob([bytes]).stream(),
     arrayBuffer: async () => bytes.slice().buffer,
+    text: async () => new TextDecoder().decode(bytes),
   };
 }
 
