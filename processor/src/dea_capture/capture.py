@@ -124,6 +124,7 @@ class Attempt:
     http_status: int | None = None
     error: str | None = None
     capture: str | None = None
+    rerouted_to: Kind | None = None  # the kind a "rerouted" attempt handed it on to
 
 
 @dataclass
@@ -258,8 +259,8 @@ def run(
     if attempt.outcome == "ok":
         rec.status, rec.capture, rec.due = "ok", attempt.capture, None
     elif attempt.outcome == "rerouted":
-        rec.kind = "page"
-        rec.due = _due(store, "page", now, h)
+        rec.kind = attempt.rerouted_to or "page"
+        rec.due = _due(store, rec.kind, now, h)
     elif attempt.outcome in {"refused", "deferred"}:
         rec.status, rec.due = attempt.outcome, None
     else:
@@ -298,7 +299,8 @@ def _store_capture(
             # the canonical URL's own redirects; no subscriber tokens
             "chain": list(chain),
             "http_status": status,
-            "headers": dict(headers),
+            # cookies are the server's for this fetch, not part of what was captured
+            "headers": {k: v for k, v in headers.items() if k.lower() != "set-cookie"},
             "file": name,
             "bytes": len(body),
             "sha256": hashlib.sha256(body).hexdigest(),
@@ -325,8 +327,10 @@ def capture_direct(
     resp = got.response
     if not 200 <= resp.status < 300:
         return Attempt(at, "failed", resp.status, f"HTTP {resp.status}")
-    if guess_kind(got.chain[-1], resp.headers.get("content-type")) == "page":
-        return Attempt(at, "rerouted", resp.status, "HTML: needs capture-page")
+    # an HTML page, or a video site's player page: not a file
+    kind = guess_kind(got.chain[-1], resp.headers.get("content-type"))
+    if kind != "direct":
+        return Attempt(at, "rerouted", resp.status, f"needs capture-{kind}", rerouted_to=kind)
     folder = _store_capture(store, rec, now, got.chain, resp.status, resp.headers, resp.body,
                             "direct")  # fmt: skip
     return Attempt(at, "ok", resp.status, capture=folder)

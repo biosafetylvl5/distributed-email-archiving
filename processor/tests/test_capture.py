@@ -256,6 +256,33 @@ def test_html_is_handed_to_the_page_stage(tmp_path: Path) -> None:
     assert _due_keys(tmp_path) == [due_key("page", T0, rec.h)]
 
 
+def test_a_link_that_lands_on_a_video_page_goes_to_the_media_stage(tmp_path: Path) -> None:
+    link = "https://www.example.org/watch.pdf"
+    video = "https://www.youtube.com/watch?v=abc"
+    store, key = _queued(tmp_path, link)
+    result = run(store, key, _guarded(Web(redirects={link: video})), now=T0, pacer=HostPacer(0))
+    assert result.outcome == "rerouted"
+    rec = _record(store, link)
+    assert (rec.kind, rec.status, rec.capture) == ("media", "queued", None)
+    assert _due_keys(tmp_path) == [due_key("media", T0, rec.h)]
+
+
+def test_stored_headers_leave_out_cookies(tmp_path: Path) -> None:
+    store, key = _queued(tmp_path)
+
+    class Cookied(Web):
+        def get(self, url: str, *, addresses: Sequence[IPAddress]) -> Response:
+            r = super().get(url, addresses=addresses)
+            return Response(r.url, r.status, {**r.headers, "Set-Cookie": "sid=1"}, r.body)
+
+    web = Cookied(bodies={PDF: ("application/pdf", b"%PDF-1.7")})
+    run(store, key, _guarded(web), now=T0, pacer=HostPacer(0))
+    rec = _record(store, PDF)
+    meta = json.loads(store.get(f"{rec.capture}capture.json") or b"")
+    assert "content-type" in meta["headers"]
+    assert not [k for k in meta["headers"] if k.lower() == "set-cookie"]
+
+
 def test_too_large_is_deferred_and_refused_is_final(tmp_path: Path) -> None:
     store, key = _queued(tmp_path)
     run(store, key, _guarded(Web(huge={PDF})), now=T0, pacer=HostPacer(0))
