@@ -11,7 +11,11 @@ listing the bucket, which costs more CPU than a Worker on the free plan has.
 - ``retries``: how many of the dashboard's retry requests are waiting, and
   what the latest did (``dashboard/retries.json``);
 - ``urls``: how many ``captures/index/`` records there are of each kind and
-  status, how many have a Wayback snapshot, and the latest update.
+  status, how many have a Wayback snapshot, and the latest update;
+- ``storage``: what the bucket holds, as of ``computed_at``: objects and
+  bytes by area (``AREAS``), the link captures by kind, and each message's
+  ``issues/<sha>/`` in bytes. Listing every object takes a while, so this is
+  redone every ``STORAGE_EVERY``, and kept in the state in between.
 
 It is written compact, since the Worker parses it on every page view. It is
 rebuilt from listings, so deleted objects drop out. Metadata is read
@@ -25,7 +29,7 @@ import json
 import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from .store import Listed, Store
@@ -36,6 +40,10 @@ STATE_KEY = "dashboard/summary-state.json"
 RETRY_REQUESTS = "captures/retry/"
 RETRY_RESULTS = "dashboard/retries.json"
 VERSION = 1
+STORAGE_EVERY = timedelta(hours=1)
+# the parts of the bucket the dashboard shows the size of
+AREAS = ("archive", "quarantine", "embeds", "views", "link_records", "captures",
+         "capture_index", "queue", "dashboard", "other")  # fmt: skip
 
 _INCOMING = re.compile(r"^incoming/(archive|quarantine)/\d{4}-\d{2}-\d{2}/")
 _STATUS = re.compile(r"^issue-status/[0-9a-f]{64}\.json$")
@@ -83,6 +91,52 @@ def _retries(store: Listable) -> dict[str, Any]:
         done = []
     waiting = [o for o in store.listing(RETRY_REQUESTS) if o.key.endswith(".json")]
     return {"waiting": len(waiting), "recent": done if isinstance(done, list) else []}
+
+
+def _area(parts: list[str]) -> str:
+    top, second = parts[0], parts[1] if len(parts) > 1 else ""
+    if top == "incoming":
+        return {"archive": "archive", "quarantine": "quarantine"}.get(second, "other")
+    if top == "issues":
+        third = parts[2] if len(parts) > 3 else ""
+        return {"assets": "embeds", "view": "views"}.get(third, "link_records")
+    if top == "issue-status":
+        return "link_records"
+    if top == "captures":
+        if second == "index":
+            return "capture_index"
+        return "queue" if second in ("due", "retry") else "captures"
+    return "dashboard" if top == "dashboard" else "other"
+
+
+def _storage(store: Listable, index: dict[str, dict[str, str]], now: datetime) -> dict[str, Any]:
+    """Objects and bytes by area, link captures by kind (from ``index``, each
+    index record's metadata) and each message's ``issues/<sha>/`` bytes."""
+    areas = {a: {"count": 0, "bytes": 0} for a in AREAS}
+    kinds: dict[str, dict[str, Any]] = {}
+    messages: dict[str, int] = {}
+    for o in store.listing(""):
+        parts = o.key.split("/")
+        area = _area(parts)
+        areas[area]["count"] += 1
+        areas[area]["bytes"] += o.size
+        if parts[0] == "issues" and len(parts) > 2:
+            messages[parts[1]] = messages.get(parts[1], 0) + o.size
+        elif area == "captures" and len(parts) > 3:
+            kind = index.get(f"captures/index/{parts[2]}.json", {}).get("kind", "unknown")
+            k = kinds.setdefault(kind, {"count": 0, "bytes": 0, "urls": set()})
+            k["count"] += 1
+            k["bytes"] += o.size
+            k["urls"].add(parts[2])
+    return {
+        "computed_at": _iso(now),
+        "areas": areas,
+        "captures": {
+            kind: {"count": k["count"], "bytes": k["bytes"], "urls": len(k["urls"])}
+            for kind, k in sorted(kinds.items())
+        },
+        "messages": messages,
+    }
 
 
 def _metadata_for(
@@ -165,6 +219,14 @@ def build(
             last = m["updated_at"]
 
     total = sum(sum(s.values()) for s in by_kind.values())
+
+    storage = state.get("storage")
+    try:
+        due = datetime.fromisoformat(storage["computed_at"]) + STORAGE_EVERY <= now()
+    except (TypeError, KeyError, ValueError):
+        due = True
+    if due:
+        storage = state["storage"] = _storage(store, meta, now())
     summary = {
         "version": VERSION,
         "generated_at": _iso(now()),
@@ -177,10 +239,11 @@ def build(
             "wayback": wayback,
             "lastUpdated": last,
         },
+        "storage": storage,
     }
     _put_compact(store, STATE_KEY, state)
     _put_compact(store, SUMMARY_KEY, summary)
     return {
         "incoming": len(incoming_out), "statuses": len(statuses_out),
-        "urls": total, "metadata_read": reads,
+        "urls": total, "metadata_read": reads, "storage_listed": due,
     }  # fmt: skip

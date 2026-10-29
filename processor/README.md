@@ -106,6 +106,21 @@ redirect couldn't be followed) with counts of what was resolved and queued.
 A message whose embeds are already done still gets its links resolved, once.
 `--no-links` skips this half.
 
+Last, `issues/<sha256>/view/`: the message as the admin dashboard shows it.
+`index.html` is the HTML part (or the text part, escaped) with every embed,
+`srcset` and CSS `url()` pointing at the stored copy, and stored stylesheets
+copied to `css/` with their own references rewritten the same way. An embed
+that wasn't stored, and every tracking pixel, is dropped. A link points at
+where it was resolved to, or at its canonical URL for a `capture` link, and
+opens in a new tab; any other link (a tracker that wasn't followed,
+unsubscribe and other per-reader links, `mailto:`) loses its `href`. Scripts,
+frames, forms, `<meta>`, `<base>` and event handlers are removed. `meta.json`,
+written last, has the headers the dashboard shows, the MIME parts (types and
+sizes), sizes and what was removed, by count. It is rendered again whenever
+the links change, and for a message skipped as done if it has none or it's
+from an older `VIEW_VERSION`. A rendering failure is counted (`view_failed`)
+and never stops the capture.
+
 A redirect that couldn't be followed (a tracker that answered 429, say) is
 not retried on its own. `dea-capture relink s3://<bucket>` follows those
 again, message by message, at most one request per host every 10 s
@@ -233,6 +248,12 @@ since the last run get a HEAD request; what it has seen is kept in
 and of each `issue-status/` record only the fields the dashboard reads, less
 counts of 0. Both files are compact JSON, as the Worker parses the summary on
 every page view.
+
+Once an hour it also lists the whole bucket and adds `storage` to the
+summary: objects and bytes by area (archived and quarantined mail, embeds,
+rendered views, link records, link captures by kind, the capture index and
+queue), and the bytes under each message's `issues/<sha256>/`. In between,
+the last count is carried over.
 
 Before that, it applies the dashboard's retry requests. The Worker never
 edits a capture record, as a running capture would overwrite the edit. It

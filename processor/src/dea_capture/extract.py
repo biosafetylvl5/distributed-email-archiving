@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import email
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from email import policy
 from email.message import EmailMessage
@@ -204,6 +205,36 @@ def css_urls(css: str, base: str | None = None) -> tuple[list[str], list[str]]:
         if url:
             assets.append(url)
     return imports, assets
+
+
+def rewrite_css(css: str, base: str | None, to: Callable[[str | None, bool], str]) -> str:
+    """``css`` with each ``@import`` and ``url()`` replaced by ``to(url, is_import)``,
+    where ``url`` is absolute as in ``css_urls`` (None when it isn't http(s)).
+    ``data:`` URLs are kept as they are. Comments are dropped."""
+
+    def absolute(raw: str) -> str | None:
+        raw = raw.strip()
+        url = urljoin(base, raw) if base else raw
+        return url if _is_http(url) else None
+
+    def imp(m: re.Match[str]) -> str:
+        raw = m.group("u1") if m.group("u1") is not None else m.group("u2") or ""
+        return f'@import url("{to(absolute(raw), True)}")'
+
+    def asset(m: re.Match[str]) -> str:
+        raw = m.group("u")
+        if raw.strip().lower().startswith("data:"):
+            return m.group(0)
+        return f'url("{to(absolute(raw), False)}")'
+
+    out, pos = [], 0
+    css = _CSS_COMMENT.sub("", css)
+    for m in _CSS_IMPORT.finditer(css):
+        out.append(_CSS_URL.sub(asset, css[pos : m.start()]))
+        out.append(imp(m))
+        pos = m.end()
+    out.append(_CSS_URL.sub(asset, css[pos:]))
+    return "".join(out)
 
 
 def extract_embeds(html: str | None) -> list[Embed]:

@@ -77,6 +77,9 @@ input[type=text],input[type=number],input[type=url],textarea{padding:.2rem .3rem
 .chart td.bars{width:50%}.bar{display:inline-block;height:.8em;vertical-align:middle}
 .bar.a{background:#3d8f5a}.bar.q{background:#d9a520}
 form.inline{display:inline}
+iframe.mail{width:100%;height:80vh;border:1px solid #ddd;background:#fff;resize:vertical}
+dl.hdrs{display:grid;grid-template-columns:max-content 1fr;gap:.2rem .8rem;background:#fff;border:1px solid #ddd;padding:.5rem .8rem}
+dl.hdrs dt{color:#555}dl.hdrs dd{margin:0;overflow-wrap:anywhere}
 .status-approved{color:#17703a}.status-blocked{color:#b02a2a}.status-pending{color:#8a6d00}
 `;
 
@@ -84,7 +87,13 @@ export function page(
   path: string,
   title: string,
   body: Html,
-  opts: { email?: string; msg?: string | null; err?: string | null; status?: number } = {},
+  opts: {
+    email?: string;
+    msg?: string | null;
+    err?: string | null;
+    status?: number;
+    headers?: Record<string, string>; // over SECURITY_HEADERS
+  } = {},
 ): Response {
   const nav = NAV.map(
     ([href, label]) =>
@@ -101,6 +110,6 @@ ${opts.err ? html`<div class="msg err">${opts.err}</div>` : ""}
 ${body}</main></body></html>`;
   return new Response(doc.value, {
     status: opts.status ?? 200,
-    headers: securityHeaders({ "content-type": "text/html; charset=utf-8" }),
+    headers: securityHeaders({ "content-type": "text/html; charset=utf-8", ...opts.headers }),
   });
 }

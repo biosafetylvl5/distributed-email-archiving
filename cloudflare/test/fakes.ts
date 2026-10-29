@@ -87,6 +87,11 @@ export class FakeR2 {
     return body(o, r ? o.bytes.slice(r.offset, r.offset + r.length) : o.bytes);
   }
 
+  async head(key: string) {
+    const o = this.objects.get(key);
+    return o ? body(o, o.bytes) : null;
+  }
+
   async delete(key: string): Promise<void> {
     this.objects.delete(key);
   }

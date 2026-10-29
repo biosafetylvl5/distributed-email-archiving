@@ -25,7 +25,8 @@ import {
   waitingRetries,
   type RetryResult,
 } from "./retry";
-import { snapshot, type Snapshot } from "./summary";
+import { snapshot, STORAGE_AREAS, type Snapshot, type Storage } from "./summary";
+import { findMessage, getViewMeta, issueSizes, rawMail, viewFile, type ViewMeta } from "./messages";
 import {
   URL_KINDS,
   URL_STATUSES,
@@ -221,6 +222,8 @@ ${partial}
 
 ${captureSection(captures, now)}
 
+${storageSection(snap.storage, now)}
+
 <h2>Last ${CHART_DAYS} days <span class="muted">(UTC)</span></h2>
 <table class="chart"><tr><th>Day</th><th>Archived</th><th>Quarantined</th><th></th></tr>
 ${[...stats.days].reverse().map(
@@ -321,6 +324,33 @@ ${t.links_resolved} redirects followed, ${t.links_unresolved} couldn't be, ${t.l
 <span class="muted">· new mail is picked up within about 5 minutes</span></td></tr></table>`;
 }
 
+function storageSection(st: Storage | null, now: Date): Html {
+  if (!st) {
+    return html`<h2>Storage</h2><p class="muted">Not counted yet: dea-capture lists the whole bucket about once an hour.</p>`;
+  }
+  const total = STORAGE_AREAS.reduce(
+    (t, [a]) => ({ count: t.count + st.areas[a].count, bytes: t.bytes + st.areas[a].bytes }),
+    { count: 0, bytes: 0 },
+  );
+  const kinds = Object.entries(st.captures).filter(([, k]) => k.count);
+  const kindLabel = (k: string) => (k in URL_KIND_LABELS ? URL_KIND_LABELS[k as UrlKind] : k);
+  return html`<h2>Storage <span class="muted">(the whole R2 bucket, counted
+<span title="${st.computedAt?.toISOString() ?? ""}">${agoTime(st.computedAt, now)}</span>; recounted hourly)</span></h2>
+<table><tr><th></th><th>Objects</th><th>Size</th><th>Share</th></tr>
+${STORAGE_AREAS.filter(([a]) => st.areas[a].count).map(([a, label]) => {
+  const x = st.areas[a];
+  const sub =
+    a === "captures" && kinds.length
+      ? html`<br><span class="muted">${kinds.map(
+          ([k, v], i) => html`${i ? " · " : ""}${kindLabel(k)}: ${formatBytes(v.bytes)} for ${v.urls} URLs`,
+        )}</span>`
+      : "";
+  return html`<tr><th>${label}${sub}</th><td>${x.count}</td><td>${formatBytes(x.bytes)}</td>
+<td>${total.bytes ? ((100 * x.bytes) / total.bytes).toFixed(1) : "0"}%</td></tr>`;
+})}
+<tr><th>Total</th><td>${total.count}</td><td>${formatBytes(total.bytes)}</td><td></td></tr></table>`;
+}
+
 const URL_KIND_LABELS = { page: "Pages", direct: "Files", media: "Media", gallery: "Social posts" } as const;
 
 // `back`: the /captures state to return to, when cells get "Retry now" buttons
@@ -386,13 +416,22 @@ ${recent.map(
 }`;
 }
 
-function captureRow(m: ArchivedMessage, back: string): Html {
+function messagePath(sha: string, day?: string): string {
+  return `/messages/${sha}${day ? `?day=${day}` : ""}`;
+}
+
+function captureRow(m: ArchivedMessage, back: string, storage: Storage | null): Html {
   const c = m.capture;
   const sub = m.user ? html`<a href="${userPath(m.user)}">${m.user}</a> <code>${m.tag || "(bare)"}</code>` : html`<span class="muted">unknown</span>`;
   const sha = m.key.split("/").pop()?.replace(/\.eml$/, "") ?? "";
+  const link = html`<a href="${messagePath(sha, m.day)}" title="View ${sha}"><code>${sha.slice(0, 12)}</code></a>`;
+  const stored = storage?.messages.get(sha);
+  const size = html`<td title="Embedded files, link records and the rendered view; not the link captures, which messages share">${
+    stored === undefined ? "" : formatBytes(stored)
+  }</td>`;
   if (!c) {
-    return html`<tr><td>${m.day}</td><td>${sub}</td><td><code class="muted" title="${sha}">${sha.slice(0, 12)}</code></td>
-<td class="muted">pending</td><td></td><td></td><td></td><td></td></tr>`;
+    return html`<tr><td>${m.day}</td><td>${sub}</td><td>${link}</td>
+<td class="muted">pending</td><td></td><td></td>${size}<td></td><td></td></tr>`;
   }
   const n = c.counts;
   const problems = [
@@ -400,12 +439,12 @@ function captureRow(m: ArchivedMessage, back: string): Html {
     n.assets_deferred ? `${n.assets_deferred} deferred` : "",
     n.assets_refused ? `${n.assets_refused} refused` : "",
   ].filter(Boolean);
-  return html`<tr><td>${m.day}</td><td>${sub}</td><td><code title="${sha}">${sha.slice(0, 12)}</code></td>
+  return html`<tr><td>${m.day}</td><td>${sub}</td><td>${link}</td>
 <td class="${c.state === "done" ? "status-approved" : "status-pending"}">${c.state === "done" ? "complete" : "partial"}</td>
 <td>${n.assets_ok}${problems.length ? html` <span class="status-pending">(${problems.join(", ")})</span>` : ""}</td>
 <td>${n.links_capture + n.links_resolve} <span class="muted">/ ${n.links}</span>
 ${c.linksState === "pending" ? html`<span class="muted">· not queued yet</span>` : html`<span class="muted">· ${n.captures_queued} URLs queued</span>${n.links_unresolved ? html` <span class="status-pending">(${n.links_unresolved} unresolved)</span>` : ""}`}</td>
-<td title="${c.completedAt?.toISOString() ?? ""}">${c.completedAt?.toISOString().slice(0, 16).replace("T", " ") ?? ""}</td>
+${size}<td title="${c.completedAt?.toISOString() ?? ""}">${c.completedAt?.toISOString().slice(0, 16).replace("T", " ") ?? ""}</td>
 <td>${retryButton({ scope: "message", sha }, back, "Follow this message's failed redirects again, then capture its failed links again now")}</td></tr>`;
 }
 
@@ -421,7 +460,7 @@ async function capturesPage(ctx: Ctx): Promise<Response> {
     ctx,
     "Captures",
     html`<p class="muted">What dea-capture stored for each archived message, newest first: embedded files and
-the link inventory. Counts only; the files themselves are in R2 under <code>issues/&lt;sha&gt;/</code>.</p>
+the link inventory, under <code>issues/&lt;sha&gt;/</code> in R2. Open a message to read it.</p>
 ${freshness(snap, now)}
 ${c.partial ? html`<p class="msg warn">Only part of the archive was scanned.</p>` : ""}
 <h2>Linked URLs</h2>
@@ -436,8 +475,8 @@ ${
   shown.length === 0
     ? html`<p class="muted">No messages.</p>`
     : html`<table><tr><th>Received</th><th>Subscription</th><th>Message</th><th>Status</th><th>Embedded files</th>
-<th title="links to capture or resolve, of all links">Links</th><th>Processed (UTC)</th><th></th></tr>
-${shown.slice(0, CAPTURE_PAGE_MAX).map((m) => captureRow(m, state))}</table>
+<th title="links to capture or resolve, of all links">Links</th><th>Stored</th><th>Processed (UTC)</th><th></th></tr>
+${shown.slice(0, CAPTURE_PAGE_MAX).map((m) => captureRow(m, state, snap.storage))}</table>
 ${shown.length > CAPTURE_PAGE_MAX ? html`<p class="muted">Showing the newest ${CAPTURE_PAGE_MAX} of ${shown.length}.</p>` : ""}`
 }`,
   );
@@ -651,7 +690,96 @@ async function saveSettings(ctx: Ctx): Promise<Response> {
 }
 
 function formatBytes(n: number): string {
-  return n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KiB` : `${(n / 1048576).toFixed(1)} MiB`;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KiB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MiB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GiB`;
+}
+
+// --- one archived message, as dea-capture rendered it
+
+// the message page frames its own rendered view; nothing else
+const MESSAGE_PAGE_CSP =
+  "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-src 'self'; frame-ancestors 'none'; base-uri 'none'";
+const HEADER_LABELS = [
+  ["subject", "Subject"],
+  ["from", "From"],
+  ["to", "To"],
+  ["date", "Date"],
+  ["list-id", "List-Id"],
+] as const;
+const REMOVED_LABELS: Record<string, string> = {
+  pixels: "tracking pixels",
+  unstored: "embeds not stored",
+  links_removed: "links removed (trackers, unsubscribe and other per-reader links)",
+  links_kept: "links kept, pointing where they lead",
+};
+
+function partsTable(meta: ViewMeta): Html {
+  if (!meta.parts.length) return html`<p class="muted">None.</p>`;
+  return html`<table><tr><th>Part</th><th>Type</th><th>Size</th><th></th></tr>
+${meta.parts.map(
+  (p, i) => html`<tr><td>${i + 1}</td><td><code>${p.contentType}</code></td><td>${formatBytes(p.bytes)}</td>
+<td class="muted">${[p.disposition, p.filename, p.cid ? "embedded (cid)" : ""].filter(Boolean).join(" · ")}</td></tr>`,
+)}</table>`;
+}
+
+async function messagePage(ctx: Ctx, sha: string): Promise<Response> {
+  const { env } = ctx;
+  const meta = await getViewMeta(env, sha);
+  const [key, sizes] = await Promise.all([findMessage(env, sha, meta, ctx.url.searchParams.get("day")), issueSizes(env, sha)]);
+  const eml = key ? await env.ARCHIVE.head(key) : null;
+  if (!eml && !meta) return text(404, "not found");
+  const m = key ? /^incoming\/archive\/(\d{4}-\d{2}-\d{2})\//.exec(key) : null;
+  const user = eml?.customMetadata?.user ?? "";
+  const tag = eml?.customMetadata?.tag ?? "";
+  const emlBytes = eml?.size ?? meta?.sizes.eml ?? 0;
+  const total = emlBytes + sizes.embeds.bytes + sizes.view.bytes + sizes.records.bytes;
+  const subject = meta?.headers.subject || "(no subject)";
+  const body = html`<p>${m ? html`Received ${m[1]}` : ""}${user ? html` for <a href="${userPath(user)}">${user}</a> <code>${tag || "(bare)"}</code>` : ""}
+· <code title="${sha}">${sha.slice(0, 12)}</code>
+${key ? html` · <a href="/messages/${sha}/source">view source</a> · <a href="/messages/${sha}/raw">download .eml</a>` : ""}
+· <a href="/captures">all messages</a></p>
+${
+  meta
+    ? html`<dl class="hdrs">${HEADER_LABELS.filter(([h]) => meta.headers[h]).map(
+        ([h, label]) => html`<dt>${label}</dt><dd>${meta.headers[h]}</dd>`,
+      )}</dl>
+<p class="muted">As stored: every embedded file is our copy and every link goes where it leads, never through a
+tracker; nothing loads from elsewhere and scripts don't run. Rendered ${meta.renderedAt?.toISOString().slice(0, 16).replace("T", " ") ?? "?"} UTC.
+${Object.entries(meta.removed)
+  .filter(([k]) => k in REMOVED_LABELS)
+  .map(([k, v]) => `${v} ${REMOVED_LABELS[k]}`)
+  .join("; ")}</p>
+<iframe class="mail" src="/messages/${sha}/view/index.html" title="${subject}"
+ sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe>`
+    : html`<p class="msg warn">dea-capture hasn't rendered this message yet; it does so when it processes it, within
+about 5 minutes of arrival. The source is below.</p>`
+}
+
+<h2>Size</h2>
+<table><tr><th></th><th>Files</th><th>Size</th></tr>
+<tr><th>The message (.eml)</th><td>1</td><td>${formatBytes(emlBytes)}</td></tr>
+<tr><th>Embedded files</th><td>${sizes.embeds.count}</td><td>${formatBytes(sizes.embeds.bytes)}</td></tr>
+<tr><th>Rendered view</th><td>${sizes.view.count}</td><td>${formatBytes(sizes.view.bytes)}</td></tr>
+<tr><th>Link records and manifest</th><td>${sizes.records.count}</td><td>${formatBytes(sizes.records.bytes)}</td></tr>
+<tr><th>Total</th><td>${1 + sizes.embeds.count + sizes.view.count + sizes.records.count}${sizes.complete ? "" : "+"}</td><td>${formatBytes(total)}</td></tr></table>
+<p class="muted">Not counted: the captures of its links, which every message linking to the same URL shares
+(see <a href="/">Storage</a> on the overview).</p>
+${meta ? html`<h2>MIME parts</h2>${partsTable(meta)}` : ""}`;
+  return page("/captures", subject, body, {
+    email: ctx.email,
+    msg: ctx.url.searchParams.get("msg"),
+    err: ctx.url.searchParams.get("err"),
+    headers: { "content-security-policy": MESSAGE_PAGE_CSP },
+  });
+}
+
+// the archived .eml: as text (view source) or downloaded
+async function messageRaw(ctx: Ctx, sha: string, download: boolean): Promise<Response> {
+  const key = await findMessage(ctx.env, sha, await getViewMeta(ctx.env, sha), ctx.url.searchParams.get("day"));
+  const obj = key ? await ctx.env.ARCHIVE.get(key) : null;
+  return obj && key ? rawMail(obj, key, download) : text(404, "not found");
 }
 
 async function quarantinePage(ctx: Ctx): Promise<Response> {
@@ -660,7 +788,7 @@ async function quarantinePage(ctx: Ctx): Promise<Response> {
     ctx,
     "Quarantine",
     html`<p class="muted">The ${items.length === 50 ? "50 most recent" : items.length} quarantined messages.
-Promote moves a message to <code>incoming/archive/</code>. Download saves the raw .eml; open it in a mail client, not a browser.</p>
+Promote moves a message to <code>incoming/archive/</code>. View source shows the raw mail as text; download saves the .eml, to open in a mail client, not a browser.</p>
 ${
   items.length === 0
     ? html`<p class="muted">Quarantine is empty.</p>`
@@ -672,7 +800,8 @@ ${items.map(
     i.meta.envelope_from ? html`<br><span class="muted">envelope: ${i.meta.envelope_from}</span>` : ""
   }</td>
 <td>${formatBytes(i.size)}</td>
-<td><a href="/quarantine/raw?key=${encodeURIComponent(i.key)}">download</a>
+<td><a href="/quarantine/raw?key=${encodeURIComponent(i.key)}&amp;view=source">view source</a> ·
+<a href="/quarantine/raw?key=${encodeURIComponent(i.key)}">download</a>
 <form class="inline" method="post" action="/quarantine/promote"><input type="hidden" name="key" value="${i.key}"><button>Promote</button></form></td></tr>`,
 )}</table>`
 }`,
@@ -683,14 +812,7 @@ async function quarantineRaw(ctx: Ctx): Promise<Response> {
   const key = ctx.url.searchParams.get("key") ?? "";
   const obj = await getQuarantined(ctx.env, key);
   if (!obj) return text(404, "not found");
-  const name = key.split("/").pop() ?? "message.eml";
-  return new Response(obj.body, {
-    headers: securityHeaders({
-      // octet-stream + attachment so the browser never renders untrusted mail on this origin
-      "content-type": "application/octet-stream",
-      "content-disposition": `attachment; filename="${name}"`,
-    }),
-  });
+  return rawMail(obj, key, ctx.url.searchParams.get("view") !== "source");
 }
 
 async function promoteMessage(ctx: Ctx): Promise<Response> {
@@ -730,6 +852,7 @@ async function route(ctx: Ctx): Promise<Response> {
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const method = request.method;
   const userMatch = /^\/users\/([a-z0-9.-]+)(\/active|\/tags)?$/.exec(path);
+  const msgMatch = /^\/messages\/([0-9a-f]{64})(?:\/(source|raw)|\/view\/(.+))?$/.exec(path);
 
   if (method === "GET" || method === "HEAD") {
     if (path === "/") return overview(ctx);
@@ -739,6 +862,12 @@ async function route(ctx: Ctx): Promise<Response> {
     if (path === "/quarantine") return quarantinePage(ctx);
     if (path === "/captures") return capturesPage(ctx);
     if (path === "/quarantine/raw") return quarantineRaw(ctx);
+    if (msgMatch) {
+      const [, sha, raw, file] = msgMatch;
+      if (file !== undefined) return (await viewFile(ctx.env, sha, file)) ?? text(404, "not found");
+      if (raw) return messageRaw(ctx, sha, raw === "raw");
+      return messagePage(ctx, sha);
+    }
     if (userMatch && !userMatch[2]) {
       const user = userMatch[1];
       if (!isValidUser(user)) return text(404, "not found");

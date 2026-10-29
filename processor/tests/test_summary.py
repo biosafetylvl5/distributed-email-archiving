@@ -56,7 +56,8 @@ def test_builds_the_summary(tmp_path: Path) -> None:
     seed(store)
     got = summary.build(store, now=lambda: NOW, workers=2)
     assert got == {"incoming": 2, "statuses": 1, "urls": 3,
-                   "metadata_read": {"incoming": 2, "statuses": 1, "index": 3}}  # fmt: skip
+                   "metadata_read": {"incoming": 2, "statuses": 1, "index": 3},
+                   "storage_listed": True}  # fmt: skip
     s = load(store)
     assert s["generated_at"] == "2026-10-27T12:00:00+00:00"
     first = s["incoming"][0]
@@ -197,3 +198,35 @@ def test_carries_the_retry_requests_and_results(tmp_path: Path) -> None:
     summary.build(store, now=lambda: NOW, workers=2)
     doc = json.loads(store.get(summary.SUMMARY_KEY) or b"")
     assert doc["retries"] == {"waiting": 1, "recent": [{"scope": "urls", "rescheduled": 2}]}
+
+
+def test_storage_by_area_kind_and_message(tmp_path: Path) -> None:
+    store = LocalStore(tmp_path)
+    seed(store)
+    h0 = f"{0:064x}"
+    store.put(f"captures/{h0[:2]}/{h0}/20261027T000000Z/page.wacz", b"w" * 100, "application/zip")
+    store.put(f"captures/ff/{'f' * 64}/20261027T000000Z/x", b"q" * 7, "text/plain")
+    store.put(f"issues/{SHA}/assets/{'c' * 64}.png", b"p" * 20, "image/png")
+    store.put(f"issues/{SHA}/view/index.html", b"v" * 5, "text/html")
+    store.put(f"issues/{SHA}/links.json", b"l" * 3, "application/json")
+    store.put(f"captures/due/page/20261027T000000Z-{h0}.json", b"{}", "application/json")
+    got = summary.build(store, now=lambda: NOW, workers=2)
+    assert got["storage_listed"] is True
+    st = load(store)["storage"]
+    assert st["computed_at"] == "2026-10-27T12:00:00+00:00"
+    a = st["areas"]
+    assert a["archive"] == {"count": 2, "bytes": 11}  # incl. junk.txt
+    assert a["quarantine"] == {"count": 1, "bytes": 1}
+    assert (a["embeds"], a["views"]) == ({"count": 1, "bytes": 20}, {"count": 1, "bytes": 5})
+    assert a["link_records"]["count"] == 2  # links.json and the status record
+    assert a["captures"] == {"count": 2, "bytes": 107} and a["queue"]["count"] == 1
+    assert st["captures"] == {"page": {"count": 1, "bytes": 100, "urls": 1},
+                              "unknown": {"count": 1, "bytes": 7, "urls": 1}}  # fmt: skip
+    assert st["messages"] == {SHA: 28}
+
+    # within the hour it's carried over, not listed again
+    store.put(f"issues/{SHA}/view/meta.json", b"m", "application/json")
+    later = summary.build(store, now=lambda: NOW + summary.STORAGE_EVERY / 2, workers=2)
+    assert later["storage_listed"] is False and load(store)["storage"]["messages"] == {SHA: 28}
+    later = summary.build(store, now=lambda: NOW + summary.STORAGE_EVERY, workers=2)
+    assert later["storage_listed"] is True and load(store)["storage"]["messages"] == {SHA: 29}

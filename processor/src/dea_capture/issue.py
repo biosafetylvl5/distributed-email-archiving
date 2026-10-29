@@ -19,6 +19,10 @@ issue's status without reading bodies:
   metadata (R2 ``customMetadata``), plus the source key. Written after the
   manifest; an issue skipped as done gets one if it's missing.
 
+Then ``issues/<sha>/view/``, the message as the dashboard shows it (see
+``view``): rendered again whenever the links change, and for an issue
+skipped as done if it's missing or of an older ``VIEW_VERSION``.
+
 Each embed is fetched once. Failures are recorded with their reason; the
 retry schedule comes with the capture stages.
 
@@ -54,6 +58,7 @@ from .guard import ForbiddenFetch, GuardedFetcher
 from .inventory import Inventory, inventory
 from .links import Relinked, captures_key, link_counts, load_links, process_links, retry_unresolved
 from .store import Store, ext_for, put_json
+from .view import view_current, write_view
 
 Status = Literal["ok", "failed", "refused", "deferred:size", "deferred:budget"]
 
@@ -233,9 +238,16 @@ def process_issue(
                     inv = inventory(raw)
                     doc = process_links(sha, inv, store, make_resolver(inv), pacer=pacer)
                     write_status(store, sha, old, links, doc)
-                    return IssueResult(sha, skipped=False, counts=_link_line(doc))
+                    line = _link_line(doc)
+                    _view(store, sha, raw, old, doc, line)
+                    return IssueResult(sha, skipped=False, counts=line)
+                captures = load_links(store, sha)
                 if not store.exists(status_key(sha)):
-                    write_status(store, sha, old, links, load_links(store, sha))
+                    write_status(store, sha, old, links, captures)
+                if not view_current(store, sha):
+                    line = {}
+                    _view(store, sha, raw, old, captures, line)
+                    return IssueResult(sha, skipped=False, counts=line)
                 return IssueResult(sha, skipped=True, counts={})
             for a in old.get("assets", []):
                 if a.get("status") == "ok" and a.get("via") != "cid":
@@ -311,7 +323,19 @@ def process_issue(
         captures = process_links(sha, inv, store, make_resolver(inv), pacer=pacer)
         counts.update(_link_line(captures))
     write_status(store, sha, manifest, links_doc, captures)
+    _view(store, sha, raw, manifest, captures, counts)
     return IssueResult(sha, skipped=False, counts=counts)
+
+
+def _view(store: Store, sha: str, raw: bytes, manifest: dict[str, Any],
+          captures: dict[str, Any] | None, counts: dict[str, int]) -> None:  # fmt: skip
+    """Render the dashboard's view; a failure is counted, not raised, as the
+    capture itself is done."""
+    try:
+        write_view(store, sha, raw, manifest, captures)
+        counts["view"] = 1
+    except Exception:
+        counts["view_failed"] = 1
 
 
 def relink_issue(
@@ -329,8 +353,9 @@ def relink_issue(
                                 deadline=deadline)  # fmt: skip
     if doc is not None:
         links_data = store.get(links_key(sha))
-        write_status(store, sha, json.loads(manifest),
-                     json.loads(links_data) if links_data else None, doc)  # fmt: skip
+        old = json.loads(manifest)
+        write_status(store, sha, old, json.loads(links_data) if links_data else None, doc)
+        _view(store, sha, raw, old, doc, {})
     return got
 
 

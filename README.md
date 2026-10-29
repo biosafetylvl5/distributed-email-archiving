@@ -99,14 +99,19 @@ The ingest Worker also serves a small dashboard (`src/admin/`) for:
 - **Subscriptions:** approve, mark pending, block or publish tags; set a name, description, sender domain, sign-up link and private note
 - **Settings:** override `POLICY_MODE`, the size limit and the daily caps without redeploying
   (stored in the `SETTINGS` KV namespace; blank falls back to `wrangler.toml`)
-- **Quarantine:** the 50 most recent quarantined messages, with download and promote-to-archive
+- **Quarantine:** the 50 most recent quarantined messages, with view source (as plain text),
+  download and promote-to-archive
 - **Captures:** per message, what `dea-capture` stored (embedded files by status, links by
   decision, how many URLs it queued), filterable to partial or pending messages; "Retry now"
   for every failed or retrying URL of a kind, or for one message's links (its failed redirects
   are followed again first). The Worker leaves a request under `captures/retry/` that the
   processor applies within 5 minutes; the page shows what the latest requests did
-- **Overview:** totals, capture progress (including every linked URL by kind and status) and
-  today's usage against the daily caps
+- **Messages:** each archived message as the processor rendered it, with its headers, MIME
+  parts and what it takes up in storage, plus view source and download. Embeds are the
+  stored copies and links point where they lead, never through a tracker. The view is served
+  into a sandboxed frame whose CSP allows no scripts and nothing from another origin
+- **Overview:** totals, capture progress (including every linked URL by kind and status),
+  storage by area (counted hourly by the processor) and today's usage against the daily caps
 
 The overview and captures pages read `dashboard/summary.json`, which the
 [processor](processor/README.md) rebuilds every 5 minutes, and say how old it is. Listing
