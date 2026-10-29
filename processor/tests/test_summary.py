@@ -24,6 +24,9 @@ class CountingStore(LocalStore):
         return super().metadata(key)
 
 
+ARCHIVED = f"incoming/archive/2026-10-25/{SHA}.eml"
+
+
 def seed(store: LocalStore) -> None:
     store.put(f"incoming/archive/2026-10-25/{SHA}.eml", b"x" * 10, "message/rfc822",
               metadata={"user": "ann", "tag": "news", "envelope_from": "n@example.com",
@@ -32,7 +35,9 @@ def seed(store: LocalStore) -> None:
               metadata={"user": "bob"})  # fmt: skip
     store.put("incoming/archive/junk.txt", b"z", "text/plain")
     store.put(f"issue-status/{SHA}.json", b"{}", "application/json",
-              metadata={"state": "done", "assets_ok": "3"})  # fmt: skip
+              metadata={"state": "done", "assets_ok": "3", "assets_failed": "0",
+                        "captures_new": "2", "extract_version": "1",
+                        "source": f"s3://bucket/{ARCHIVED}"})  # fmt: skip
     for i, (kind, status) in enumerate([("page", "ok"), ("page", "queued"), ("media", "ok")]):
         meta = {"kind": kind, "status": status, "attempts": "1",
                 "updated_at": f"2026-10-27T0{i}:00:00+00:00"}  # fmt: skip
@@ -63,8 +68,18 @@ def test_builds_the_summary(tmp_path: Path) -> None:
         "tag": "news",
         "envelope_from": "n@example.com",
     }
-    assert s["statuses"] == [{"key": f"issue-status/{SHA}.json",
-                              "customMetadata": {"state": "done", "assets_ok": "3"}}]  # fmt: skip
+    # only what the dashboard reads, zeros left out, the source as a key
+    assert s["statuses"] == [
+        {
+            "key": f"issue-status/{SHA}.json",
+            "customMetadata": {
+                "source": f"incoming/archive/2026-10-25/{SHA}.eml",
+                "state": "done",
+                "assets_ok": "3",
+            },
+        }
+    ]
+    assert b"\n" not in (store.get(summary.SUMMARY_KEY) or b"")  # compact
     assert s["urls"] == {"total": 3, "byKind": {"page": {"ok": 1, "queued": 1}, "media": {"ok": 1}},
                          "wayback": 1, "lastUpdated": "2026-10-27T02:00:00+00:00"}  # fmt: skip
 

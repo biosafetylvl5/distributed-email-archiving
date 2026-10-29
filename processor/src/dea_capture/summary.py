@@ -5,12 +5,14 @@ listing the bucket, which costs more CPU than a Worker on the free plan has.
 
 - ``incoming``: each archived and quarantined message's key, size, upload
   time and the metadata the dashboard shows (user, tag, envelope sender);
-- ``statuses``: each ``issue-status/`` record's key and metadata (counts and
-  states, no URLs);
+- ``statuses``: each ``issue-status/`` record's key and the metadata the
+  dashboard reads (``STATUS_META``: states, the message's key and counts, no
+  URLs); a count of 0 is left out, which the dashboard reads as 0;
 - ``urls``: how many ``captures/index/`` records there are of each kind and
   status, how many have a Wayback snapshot, and the latest update.
 
-It is rebuilt from listings, so deleted objects drop out. Metadata is read
+It is written compact, since the Worker parses it on every page view. It is
+rebuilt from listings, so deleted objects drop out. Metadata is read
 (a HEAD request) only for objects whose ETag changed since the last run; the
 ETags and metadata seen are kept in ``dashboard/summary-state.json``.
 """
@@ -24,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from .store import Listed, Store, put_json
+from .store import Listed, Store
 
 SUMMARY_KEY = "dashboard/summary.json"
 STATE_KEY = "dashboard/summary-state.json"
@@ -35,6 +37,14 @@ _STATUS = re.compile(r"^issue-status/[0-9a-f]{64}\.json$")
 _INDEX = re.compile(r"^captures/index/[0-9a-f]{64}\.json$")
 INCOMING_META = ("user", "tag", "envelope_from")
 INDEX_META = ("kind", "status", "wayback", "updated_at")
+# what the dashboard reads of an issue-status record (cloudflare/src/admin/captures.ts)
+STATUS_STATES = ("source", "state", "links_state", "completed_at")
+STATUS_COUNTS = (
+    "assets_ok", "assets_failed", "assets_refused", "assets_deferred", "pixels", "links",
+    "links_capture", "links_resolve", "links_skip", "links_resolved", "links_unresolved",
+    "links_refused", "captures_queued",
+)  # fmt: skip
+_BUCKET = re.compile(r"^s3://[^/]+/")
 
 
 class Listable(Store, Protocol):
@@ -45,6 +55,19 @@ class Listable(Store, Protocol):
 
 def _iso(d: datetime) -> str:
     return d.astimezone(UTC).isoformat(timespec="seconds")
+
+
+def _status_meta(meta: dict[str, str]) -> dict[str, str]:
+    """The fields the dashboard reads; ``source`` as a key, without the bucket."""
+    out = {k: meta[k] for k in STATUS_STATES if meta.get(k)}
+    if "source" in out:
+        out["source"] = _BUCKET.sub("", out["source"])
+    out.update((k, meta[k]) for k in STATUS_COUNTS if meta.get(k) not in (None, "", "0"))
+    return out
+
+
+def _put_compact(store: Store, key: str, obj: object) -> None:
+    store.put(key, json.dumps(obj, separators=(",", ":")).encode(), "application/json")
 
 
 def _metadata_for(
@@ -105,8 +128,9 @@ def build(
         store, statuses, state.setdefault("statuses", {}), None, workers
     )
     statuses_out = [
-        {"key": o.key, "customMetadata": meta[o.key]} for o in statuses if o.key in meta
-    ]
+        {"key": o.key, "customMetadata": _status_meta(meta[o.key])}
+        for o in statuses if o.key in meta
+    ]  # fmt: skip
 
     index = [o for o in store.listing("captures/index/") if _INDEX.match(o.key)]
     meta, reads["index"] = _metadata_for(
@@ -138,8 +162,8 @@ def build(
             "lastUpdated": last,
         },
     }
-    put_json(store, STATE_KEY, state)
-    put_json(store, SUMMARY_KEY, summary)
+    _put_compact(store, STATE_KEY, state)
+    _put_compact(store, SUMMARY_KEY, summary)
     return {
         "incoming": len(incoming_out), "statuses": len(statuses_out),
         "urls": total, "metadata_read": reads,

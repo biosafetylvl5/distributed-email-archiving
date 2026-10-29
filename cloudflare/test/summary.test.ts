@@ -49,6 +49,18 @@ describe("fromSummary", () => {
     expect(s?.captures.urls.lastUpdated).toEqual(new Date("2026-10-27T10:00:00Z"));
   });
 
+  it("reads trimmed statuses: zero counts left out, the source without its bucket", () => {
+    const doc = JSON.parse(file("2026-10-27T11:58:00+00:00"));
+    doc.statuses = [
+      { key: `issue-status/${sha("a")}.json`, customMetadata: { source: emlKey("2026-10-25", "a"), state: "done", links: "4" } },
+    ];
+    const s = fromSummary(JSON.stringify(doc), new Date("2026-10-27T12:00:00Z"));
+    expect(s?.captures.states).toEqual({ done: 1, partial: 0, pending: 1 });
+    expect(s?.captures.totals.links).toBe(4);
+    expect(s?.captures.totals.assets_ok).toBe(0);
+    expect(s?.captures.messages.find((m) => m.key === emlKey("2026-10-25", "a"))?.capture?.state).toBe("done");
+  });
+
   it("rejects junk and other versions", () => {
     const now = new Date();
     expect(fromSummary("not json", now)).toBeNull();

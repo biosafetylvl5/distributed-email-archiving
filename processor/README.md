@@ -222,7 +222,10 @@ It lists the archive, `issue-status/` and `captures/index/`, and writes
 `dashboard/summary.json`: the counts and metadata the admin dashboard shows,
 which the Worker can't afford to list itself. Only objects whose ETag changed
 since the last run get a HEAD request; what it has seen is kept in
-`dashboard/summary-state.json`. Recipient addresses and URLs are left out.
+`dashboard/summary-state.json`. Recipient addresses and URLs are left out,
+and of each `issue-status/` record only the fields the dashboard reads, less
+counts of 0. Both files are compact JSON, as the Worker parses the summary on
+every page view.
 
 ## Usage
 
