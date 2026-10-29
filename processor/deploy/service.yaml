@@ -146,8 +146,9 @@ spec:
           # one browser at a time: the crawler's redis has a fixed port, and
           # a browser wants about 1-2 GiB
           max_workers: 1
-          # the crawl is killed after 7 minutes; this leaves time to upload
-          timeout_seconds: 900
+          # a crawl is killed after 7 minutes, and a failed page may crawl its
+          # Wayback snapshot too; this leaves time for both and the uploads
+          timeout_seconds: 1800
           log_to_logger: true
     - watch-media:
         kind: data_monitor

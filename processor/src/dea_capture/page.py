@@ -12,7 +12,8 @@ Stored in the attempt's folder under ``captures/<h[:2]>/<h>/<stamp>/``:
 ``capture.json``.
 
 The crawler's own log names every URL the page loaded. It is kept in the
-temporary directory and never printed.
+temporary directory and never printed; when a crawl fails, its error lines,
+with every URL cut down to its host, become the attempt's error.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -62,6 +64,7 @@ class Crawl:
     screenshot: bytes | None
     final_text: str | None = None  # after the behaviours; None if unchanged from load
     stats: ProxyStats = field(default_factory=ProxyStats)
+    log_errors: str | None = None  # see log_errors()
 
 
 Crawler = Callable[[str, Path], Crawl]
@@ -128,6 +131,52 @@ def _end_group(pgid: int, grace: float = 10.0) -> None:
             time.sleep(0.1)
 
 
+_URL = re.compile(r"""https?://([^/\s"'<>?#]+)[^\s"'<>]*""")
+_ADDRESS = re.compile(r"[\w.%+-]+@[\w-]+(?:\.[\w-]+)+")
+# what failed and why, from a log line's details
+_DETAIL_KEYS = ("type", "msg", "reason", "status", "loadState", "errorText", "errorMessage")
+# the crawler says this whenever its one page failed: no news
+_GENERIC = ("Crawl failed, no pages crawled successfully",)
+LOG_ERRORS_MAX = 300
+
+
+def _mask(text: str) -> str:
+    """Every URL down to its host, and no mail addresses."""
+    return _ADDRESS.sub("<address>", _URL.sub(r"<\1>", text))
+
+
+def log_errors(log: Path) -> str | None:
+    """The distinct warnings and errors in a crawler log (one JSON object a
+    line), URLs masked, cut to ``LOG_ERRORS_MAX`` characters; None if none."""
+    found: list[str] = []
+    try:
+        lines = log.read_text("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("logLevel") not in {"warn", "error", "fatal"}:
+            continue
+        message = str(entry.get("message", "")).strip()
+        if not message or message.startswith(_GENERIC):
+            continue
+        details = entry.get("details")
+        extra = []
+        if isinstance(details, dict):
+            extra = [f"{k}={_mask(str(details[k]))}" for k in _DETAIL_KEYS
+                     if details.get(k) not in (None, "")]  # fmt: skip
+        text = _mask(message) + (f" ({', '.join(extra)})" if extra else "")
+        if text not in found:
+            found.append(text)
+    if not found:
+        return None
+    joined = "; ".join(found)
+    return joined if len(joined) <= LOG_ERRORS_MAX else joined[: LOG_ERRORS_MAX - 1] + "…"
+
+
 def run_crawler(url: str, workdir: Path, proxy: GuardProxy, user_agent_suffix: str) -> Crawl:
     """Run browsertrix-crawler on ``url`` behind ``proxy`` (started here)."""
     _become_subreaper()
@@ -148,11 +197,12 @@ def run_crawler(url: str, workdir: Path, proxy: GuardProxy, user_agent_suffix: s
     finally:
         proxy.stop()
     wacz = workdir / "collections" / COLLECTION / f"{COLLECTION}.wacz"
+    errors = log_errors(workdir / "crawl.log")
     if not wacz.is_file():
-        return Crawl(code, None, None, None, stats=proxy.stats)
+        return Crawl(code, None, None, None, stats=proxy.stats, log_errors=errors)
     got = read_wacz(wacz, url)
     return Crawl(code, wacz, got.page, got.screenshot, final_text=got.final_text,
-                 stats=proxy.stats)  # fmt: skip
+                 stats=proxy.stats, log_errors=errors)  # fmt: skip
 
 
 def _warc_records(data: bytes) -> Iterator[tuple[dict[str, str], bytes]]:
@@ -231,6 +281,10 @@ class PageOutcome:
     info: dict[str, Any] = field(default_factory=dict)
 
 
+def _why(error: str, c: Crawl) -> str:
+    return f"{error}: {c.log_errors}" if c.log_errors else error
+
+
 def crawl_page(
     canonical: str, crawler: Crawler, extra_blocked: Sequence[IPNetwork] = ()
 ) -> PageOutcome:
@@ -249,11 +303,11 @@ def crawl_page(
             if host in c.stats.refused:
                 return PageOutcome("refused", error="the proxy refused the page's host")
             why = "crawl timed out" if c.exit_code is None else f"crawl exit {c.exit_code}"
-            return PageOutcome("failed", error=f"{why}, no page recorded")
+            return PageOutcome("failed", error=_why(f"{why}, no page recorded", c))
         if status is not None and not 200 <= status < 300:
             return PageOutcome("failed", status, f"HTTP {status}")
         if not c.page.get("loadState"):
-            return PageOutcome("failed", status, "page didn't load")
+            return PageOutcome("failed", status, _why("page didn't load", c))
         files: dict[str, bytes] = {"page.wacz": c.wacz.read_bytes()}
         if c.screenshot:
             files["screenshot.png"] = c.screenshot
@@ -277,8 +331,11 @@ _TYPES = {".wacz": "application/wacz", ".png": "image/png", ".txt": "text/plain;
 
 
 def store_page(
-    store: Store, folder: str, canonical: str, got: PageOutcome, fetched_at: str
-) -> None:
+    store: Store, folder: str, canonical: str, got: PageOutcome, fetched_at: str, *,
+    via: str = "browsertrix", snapshot: str | None = None,
+) -> None:  # fmt: skip
+    """``via`` and ``snapshot``: where the page came from, if not ``canonical``
+    itself (``wayback:<timestamp>`` and the replay URL that was crawled)."""
     for name, data in got.files.items():
         store.put(folder + name, data, _TYPES[Path(name).suffix])
     put_json(
@@ -286,7 +343,8 @@ def store_page(
         folder + "capture.json",
         {
             "canonical": canonical,
-            "via": "browsertrix",
+            "via": via,
+            **({"snapshot": snapshot} if snapshot else {}),
             "http_status": got.http_status,
             **got.info,
             "files": {name: _file(data) for name, data in got.files.items()},

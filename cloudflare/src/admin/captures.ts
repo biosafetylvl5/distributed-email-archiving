@@ -56,7 +56,7 @@ export type UrlStatus = (typeof URL_STATUSES)[number];
 export interface UrlCaptures {
   total: number;
   byKind: Record<UrlKind, Record<UrlStatus, number>>;
-  wayback: number; // failed URLs with a Wayback Machine snapshot instead
+  wayback: number; // URLs with a Wayback Machine snapshot, stored when our own capture failed
   lastUpdated: Date | null;
 }
 

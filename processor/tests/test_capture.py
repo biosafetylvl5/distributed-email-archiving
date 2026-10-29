@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -19,7 +20,7 @@ from dea_capture.capture import (
     queue,
     run,
     url_hash,
-    wayback_raw,
+    wayback_url,
 )
 from dea_capture.classify import tracking_vendor
 from dea_capture.fetch import HostPacer, TooLarge
@@ -172,6 +173,19 @@ def test_a_lost_due_key_is_put_back(tmp_path: Path) -> None:
 # ── capture-direct ───────────────────────────────────────────────────────────
 
 
+def cdx_api(url: str, queued: str = "20261001120000") -> str:
+    return (
+        "https://web.archive.org/cdx/search/cdx?url="
+        + quote(url, safe="")
+        + f"&output=json&fl=timestamp%2Coriginal&filter=statuscode%3A200&closest={queued}"
+        "&sort=closest&limit=1"
+    )
+
+
+def cdx_answer(ts: str, url: str) -> bytes:
+    return json.dumps([["timestamp", "original"], [ts, url]]).encode()
+
+
 def _queued(tmp_path: Path, url: str = PDF) -> tuple[LocalStore, str]:
     store = LocalStore(tmp_path)
     queue(store, url, "direct", T0)
@@ -226,25 +240,49 @@ def test_failures_retry_on_the_schedule_then_fall_back_to_wayback(tmp_path: Path
         assert parse_due_key(key)[1] == now
 
     ts = "20260915000000"
-    snap = f"https://web.archive.org/web/{ts}/{PDF}"
-    raw = wayback_raw(snap, ts)
+    raw = wayback_url(ts, PDF, "id_")
     assert raw == f"https://web.archive.org/web/{ts}id_/{PDF}"
-    api = (
-        "https://archive.org/wayback/available?url=https%3A%2F%2Fdocs.example.org"
-        "%2Freport.pdf&timestamp=20261001120000"
-    )
-    closest = {"available": True, "status": "200", "timestamp": ts, "url": snap}
-    answer = json.dumps({"archived_snapshots": {"closest": closest}}).encode()
-    wayback = Web(bodies={raw: ("application/pdf", b"%PDF old"), api: ("application/json", answer)})
+    wayback = Web(bodies={raw: ("application/pdf", b"%PDF old"),
+                          cdx_api(PDF): ("application/json", cdx_answer(ts, PDF))})  # fmt: skip
     result = run(
         store, key, _guarded(web), now=now, pacer=HostPacer(0), wayback_fetcher=_guarded(wayback)
     )
     assert (result.status, result.attempts) == ("failed", len(RETRY_AFTER) + 1)
     rec = _record(store, PDF)
-    assert rec.wayback is not None and rec.wayback["timestamp"] == ts
+    assert rec.wayback is not None
+    assert rec.wayback == {"timestamp": ts, "capture": rec.wayback["capture"], "via": "raw"}
     assert store.get(rec.wayback["capture"] + "original.pdf") == b"%PDF old"
     assert _due_keys(tmp_path) == []
     assert (store.metadata(index_key(rec.h)) or {})["wayback"] == ts
+
+
+def test_a_failing_file_gets_its_snapshot_after_two_failures(tmp_path: Path) -> None:
+    store, key = _queued(tmp_path)
+    web = Web(status={PDF: 500})
+    ts = "20260915000000"
+    wayback = Web(bodies={wayback_url(ts, PDF, "id_"): ("application/pdf", b"%PDF old"),
+                          cdx_api(PDF): ("application/json", cdx_answer(ts, PDF))})  # fmt: skip
+    kw = {"pacer": HostPacer(0), "wayback_fetcher": _guarded(wayback)}
+    run(store, key, _guarded(web), now=T0, **kw)  # type: ignore[arg-type]
+    assert wayback.requested == [] and _record(store, PDF).wayback is None
+    [key] = _due_keys(tmp_path)
+    run(store, key, _guarded(web), now=T0 + RETRY_AFTER[0], **kw)  # type: ignore[arg-type]
+    rec = _record(store, PDF)
+    assert rec.status == "retrying" and rec.wayback is not None
+    assert len(wayback.requested) == 2
+    # later failures keep retrying, without asking the Wayback Machine again
+    [key] = _due_keys(tmp_path)
+    run(store, key, _guarded(web), now=T0 + RETRY_AFTER[0] + RETRY_AFTER[1], **kw)  # type: ignore[arg-type]
+    assert len(wayback.requested) == 2 and _record(store, PDF).status == "retrying"
+
+
+def test_a_file_the_site_refuses_gets_its_snapshot_at_once(tmp_path: Path) -> None:
+    store, key = _queued(tmp_path)
+    wayback = Web(bodies={cdx_api(PDF): ("application/json", b"[]")})  # no snapshot
+    run(store, key, _guarded(Web(status={PDF: 403})), now=T0, pacer=HostPacer(0),
+        wayback_fetcher=_guarded(wayback))  # fmt: skip
+    assert wayback.requested == [cdx_api(PDF)]
+    assert _record(store, PDF).wayback is None
 
 
 def test_html_is_handed_to_the_page_stage(tmp_path: Path) -> None:

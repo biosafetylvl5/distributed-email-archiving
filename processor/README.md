@@ -139,9 +139,17 @@ Every canonical URL is captured once, however many messages link to it. With
 If the body turns out to be HTML, the URL moves to the `page` queue. Bodies
 over 100 MiB are `deferred`, and refusals by the guard are final. Failures
 (network errors, 4xx and 5xx) are retried 1 h, 6 h, 1 d, 7 d and 30 d
-later. After the last one, the Wayback Machine snapshot closest to when the
-URL was first queued is stored instead, its original bytes (`id_`), not
-the Wayback page around them.
+later.
+
+A file or page that fails also gets the Wayback Machine snapshot closest to
+when the URL was first queued, found with the CDX API: at once if the site
+answered 401, 403, 429 or 451, else after the second failure (most one-off
+failures clear on the 1 h retry), else after the last. Its folder is the
+record's `wayback.capture`. The retries go on, so a capture of our own can
+still follow. A file's snapshot is its original bytes (`id_`). A page's is
+crawled as Wayback replays it (`if_`, no toolbar) into a WACZ like any other
+page, with `via: wayback:<timestamp>` and the `snapshot` URL in
+`capture.json`; if that crawl fails, the original HTML is stored instead.
 
 Page keys load the canonical URL alone in browsertrix-crawler (no other pages,
 no links followed), with its scroll and autoplay behaviours, a 60 s load
@@ -149,7 +157,8 @@ timeout, 4 minutes in all and 200 MiB at most. The attempt's folder gets
 `page.wacz`, the viewport `screenshot.png`, the extracted `text.txt` and
 `capture.json` (status, title, the crawler's version and the proxy's counts).
 Failures retry on the same schedule. The crawler's log, which names every URL
-the page loaded, stays in a temporary directory. `dea-capture page URL --out
+the page loaded, stays in a temporary directory; when the page fails, its
+warnings and errors, with each URL cut to its host, are the attempt's error. `dea-capture page URL --out
 DIR` captures one page locally, in the container image.
 
 Media keys (video sites, audio and video files) go to yt-dlp behind the same

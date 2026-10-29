@@ -43,12 +43,19 @@ KINDS: tuple[Kind, ...] = ("page", "direct", "media", "gallery")
 Status = Literal["queued", "retrying", "ok", "failed", "refused", "deferred"]
 FINAL: frozenset[str] = frozenset({"ok", "failed", "refused", "deferred"})
 
-# after the first attempt fails: retry 1 h, 6 h, 1 d, 7 d and 30 d later,
-# then take the closest Wayback Machine snapshot
+# after the first attempt fails: retry 1 h, 6 h, 1 d, 7 d and 30 d later
 RETRY_AFTER = (
     timedelta(hours=1), timedelta(hours=6), timedelta(days=1), timedelta(days=7),
     timedelta(days=30),
 )  # fmt: skip
+# A page or file that fails gets the Wayback Machine snapshot closest to when
+# it was queued: at once if the site turned us away, else after a second
+# failure, since most one-off failures clear on the 1 h retry. Retries go on,
+# so a capture of our own can still follow. Other kinds only get one once
+# their retries run out.
+WAYBACK_KINDS = frozenset({"page", "direct"})
+WAYBACK_AT_ONCE = frozenset({401, 403, 429, 451})
+WAYBACK_AFTER_FAILURES = 2
 # longer than any stage's courier timeout
 LEASE = {
     "page": timedelta(hours=1), "direct": timedelta(hours=1), "media": timedelta(hours=6),
@@ -321,8 +328,16 @@ def run(
             rec.due = _due(store, kind, now + RETRY_AFTER[failures - 1], h)
         else:
             rec.status, rec.due = "failed", None
-            if wayback_fetcher is not None:
-                rec.wayback = fetch_wayback(store, rec, wayback_fetcher, pacer, now)
+        early = kind in WAYBACK_KINDS and (
+            failures >= WAYBACK_AFTER_FAILURES or attempt.http_status in WAYBACK_AT_ONCE
+        )
+        if (
+            wayback_fetcher is not None
+            and rec.wayback is None
+            and (early or rec.status == "failed")
+        ):
+            rec.wayback = fetch_wayback(store, rec, wayback_fetcher, pacer, now,
+                                        page_crawler if kind == "page" else None)  # fmt: skip
     save(store, rec)
     if rec.due != lease:  # a 1 h retry lands on the lease's own key
         store.delete(lease)
@@ -421,36 +436,67 @@ def capture_media(
     return Attempt(at, got.outcome, error=got.error)
 
 
-def wayback_raw(snapshot_url: str, timestamp: str) -> str:
-    """The snapshot's original bytes (``id_``), not the Wayback page around them."""
-    parts = urlsplit(snapshot_url)
-    path = parts.path.replace(f"/web/{timestamp}/", f"/web/{timestamp}id_/", 1)
-    return f"https://web.archive.org{path}" + (f"?{parts.query}" if parts.query else "")
+def wayback_url(timestamp: str, original: str, mode: str = "") -> str:
+    """A snapshot's address. ``mode`` ``id_`` is its original bytes; ``if_``
+    the page as Wayback replays it, without the toolbar around it."""
+    return f"https://web.archive.org/web/{timestamp}{mode}/{original}"
+
+
+def wayback_lookup(
+    rec: CaptureRecord, fetcher: GuardedFetcher, pacer: HostPacer
+) -> tuple[str, str] | None:
+    """The timestamp and archived URL of the good (HTTP 200) snapshot closest
+    to when ``rec`` was first queued, from the CDX API. (The availability API
+    misses snapshots that CDX has.)"""
+    first = stamp(datetime.fromisoformat(rec.created_at))
+    api = "https://web.archive.org/cdx/search/cdx?" + urlencode({
+        "url": rec.canonical, "output": "json", "fl": "timestamp,original",
+        "filter": "statuscode:200", "closest": first[:8] + first[9:15], "sort": "closest",
+        "limit": "1",
+    })  # fmt: skip
+    pacer.wait(api)
+    resp = follow(fetcher, api, "link").response
+    if not 200 <= resp.status < 300:
+        return None
+    rows: Any = json.loads(resp.body or b"[]")
+    if not isinstance(rows, list) or len(rows) < 2:  # the first row is the field names
+        return None
+    ts, original = str(rows[1][0]), str(rows[1][1])
+    if not re.fullmatch(r"\d{14}", ts) or not original.startswith(("http://", "https://")):
+        return None
+    return ts, original
 
 
 def fetch_wayback(
-    store: Store, rec: CaptureRecord, fetcher: GuardedFetcher, pacer: HostPacer, now: datetime
-) -> dict[str, str] | None:
-    """Store the Wayback snapshot closest to when the URL was first queued."""
-    first = datetime.fromisoformat(rec.created_at)
-    api = "https://archive.org/wayback/available?" + urlencode(
-        {"url": rec.canonical, "timestamp": stamp(first)[:8] + stamp(first)[9:15]}
-    )
+    store: Store, rec: CaptureRecord, fetcher: GuardedFetcher, pacer: HostPacer, now: datetime,
+    page_crawler: Callable[[str], PageOutcome] | None = None,
+) -> dict[str, str] | None:  # fmt: skip
+    """Store the Wayback snapshot closest to when the URL was first queued.
+    With ``page_crawler``, the replayed snapshot is crawled like any page, into
+    a WACZ; else, or if that fails, its original bytes are stored."""
     try:
-        pacer.wait(api)
-        meta = json.loads(follow(fetcher, api, "link").response.body)
-        closest: dict[str, Any] = meta["archived_snapshots"]["closest"]
-        if not closest.get("available") or not str(closest.get("status", "")).startswith("2"):
-            return None
-        ts = str(closest["timestamp"])
-        raw = wayback_raw(str(closest["url"]), ts)
+        found = wayback_lookup(rec, fetcher, pacer)
+    except (ForbiddenFetch, FetchError, TooLarge, IndexError, TypeError, ValueError):
+        return None
+    if found is None:
+        return None
+    ts, original = found
+    folder = capture_dir(rec.h, now)
+    if page_crawler is not None:
+        replay = wayback_url(ts, original, "if_")
+        crawled = page_crawler(replay)
+        if crawled.outcome == "ok":
+            store_page(store, folder, rec.canonical, crawled, _iso(now), via=f"wayback:{ts}",
+                       snapshot=replay)  # fmt: skip
+            return {"timestamp": ts, "capture": folder, "via": "crawl"}
+    raw = wayback_url(ts, original, "id_")
+    try:
         pacer.wait(raw)
         got = follow(fetcher, raw, "link")
-    except (ForbiddenFetch, FetchError, TooLarge, KeyError, TypeError, ValueError):
+    except (ForbiddenFetch, FetchError, TooLarge):
         return None
     if not 200 <= got.response.status < 300:
         return None
     r = got.response
-    folder = _store_capture(store, rec, now, got.chain, r.status, r.headers, r.body,
-                            f"wayback:{ts}")  # fmt: skip
-    return {"timestamp": ts, "capture": folder}
+    _store_capture(store, rec, now, got.chain, r.status, r.headers, r.body, f"wayback:{ts}")
+    return {"timestamp": ts, "capture": folder, "via": "raw"}

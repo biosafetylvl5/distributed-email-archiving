@@ -138,6 +138,11 @@ def test_crawl_page_prefers_the_final_text(tmp_path: Path) -> None:
         ({"page": _page(loadState=0, status=None)}, "failed", "page didn't load"),
         ({"exit_code": 1}, "failed", "crawl exit 1, no page recorded"),
         ({"exit_code": None}, "failed", "crawl timed out, no page recorded"),
+        (
+            {"exit_code": 9, "log_errors": "Page Load Failed (msg=net::ERR_TIMED_OUT)"},
+            "failed",
+            "crawl exit 9, no page recorded: Page Load Failed (msg=net::ERR_TIMED_OUT)",
+        ),
     ],
 )
 def test_crawl_page_failures(
@@ -161,6 +166,31 @@ def test_crawl_page_refused(tmp_path: Path) -> None:
     stats.refused["news.example.org"] += 1
     got = crawl_page(URL, fake_crawler(tmp_path, exit_code=1, stats=stats))
     assert got.outcome == "refused"
+
+
+def test_log_errors(tmp_path: Path) -> None:
+    log = tmp_path / "crawl.log"
+    lines: list[Any] = [
+        {"logLevel": "info", "context": "general", "message": "Seeds", "details": {"url": URL}},
+        {"logLevel": "warn", "context": "pageStatus", "message": "Page Load Failed",
+         "details": {"msg": "net::ERR_CONNECTION_RESET at https://cdn.example.net/a?t=1",
+                     "loadState": 0, "page": URL, "workerid": 0}},
+        {"logLevel": "warn", "context": "pageStatus", "message": "Page Load Failed",
+         "details": {"msg": "net::ERR_CONNECTION_RESET at https://cdn.example.net/a?t=1",
+                     "loadState": 0, "page": URL}},
+        {"logLevel": "error", "context": "general",
+         "message": "Crawl failed, no pages crawled successfully"},
+        {"logLevel": "error", "context": "browser", "message": "Mail reader@example.com said no"},
+    ]  # fmt: skip
+    log.write_text("\n".join(json.dumps(x) for x in lines) + "\nnot json\n")
+    got = page.log_errors(log)
+    assert got == (
+        "Page Load Failed (msg=net::ERR_CONNECTION_RESET at <cdn.example.net>, loadState=0); "
+        "Mail <address> said no"
+    )
+    assert page.log_errors(tmp_path / "missing.log") is None
+    log.write_text(json.dumps({"logLevel": "error", "message": "x" * 1000}))
+    assert len(page.log_errors(log) or "") == page.LOG_ERRORS_MAX
 
 
 # -- run_crawler, with a stand-in `crawl` on PATH
@@ -287,6 +317,64 @@ def test_run_page_refused_is_final(tmp_path: Path) -> None:
     r = run(store, due, _no_direct(), now=T0,
             page_crawler=lambda url: PageOutcome("refused", error="private"))  # fmt: skip
     assert r.status == "refused"
+
+
+WAYBACK_TS = "20260930000000"
+
+
+def test_a_page_the_site_refuses_gets_its_snapshot_crawled_at_once(tmp_path: Path) -> None:
+    from dea_capture.capture import wayback_url
+
+    from .test_capture import Web, _guarded, cdx_answer, cdx_api
+
+    store, due = _page_store(tmp_path)
+    wayback = Web(bodies={cdx_api(URL): ("application/json", cdx_answer(WAYBACK_TS, URL))})
+    replay = wayback_url(WAYBACK_TS, URL, "if_")
+    seen: list[str] = []
+
+    def crawler(url: str) -> PageOutcome:
+        seen.append(url)
+        if url == URL:
+            return PageOutcome("failed", 403, "HTTP 403")
+        return PageOutcome("ok", 200, files={"page.wacz": b"old wacz"}, info={"title": "Old"})
+
+    r = run(store, due, _no_direct(), now=T0, page_crawler=crawler,
+            wayback_fetcher=_guarded(wayback))  # fmt: skip
+    assert (r.outcome, r.status) == ("failed", "retrying")
+    assert seen == [URL, replay]
+    assert wayback.requested == [cdx_api(URL)]
+    rec = CaptureRecord.load(store.get(index_key(url_hash(URL))) or b"")
+    assert rec.wayback is not None and rec.wayback["via"] == "crawl"
+    assert rec.capture is None and rec.due is not None
+    folder = rec.wayback["capture"]
+    assert store.get(folder + "page.wacz") == b"old wacz"
+    meta = json.loads(store.get(folder + "capture.json") or b"")
+    assert (meta["canonical"], meta["via"], meta["snapshot"]) == (
+        URL,
+        f"wayback:{WAYBACK_TS}",
+        replay,
+    )
+
+
+def test_a_page_whose_snapshot_will_not_crawl_gets_its_html(tmp_path: Path) -> None:
+    from dea_capture.capture import wayback_url
+
+    from .test_capture import Web, _guarded, cdx_answer, cdx_api
+
+    store, due = _page_store(tmp_path)
+    raw = wayback_url(WAYBACK_TS, URL, "id_")
+    wayback = Web(bodies={cdx_api(URL): ("application/json", cdx_answer(WAYBACK_TS, URL)),
+                          raw: ("text/html", b"<html>old</html>")})  # fmt: skip
+    failing = lambda url: PageOutcome("failed", error="crawl exit 9, no page recorded")  # noqa: E731
+    run(store, due, _no_direct(), now=T0, page_crawler=failing, wayback_fetcher=_guarded(wayback))
+    assert wayback.requested == []  # one failure, no status: wait for the retry
+    rec = CaptureRecord.load(store.get(index_key(url_hash(URL))) or b"")
+    assert rec.due is not None
+    run(store, rec.due, _no_direct(), now=T0 + RETRY_AFTER[0], page_crawler=failing,
+        wayback_fetcher=_guarded(wayback))  # fmt: skip
+    rec = CaptureRecord.load(store.get(index_key(url_hash(URL))) or b"")
+    assert rec.wayback is not None and rec.wayback["via"] == "raw"
+    assert store.get(rec.wayback["capture"] + "original.html") == b"<html>old</html>"
 
 
 def test_page_keys_need_a_crawler(tmp_path: Path) -> None:

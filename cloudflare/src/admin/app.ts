@@ -317,7 +317,7 @@ const URL_KIND_LABELS = { page: "Pages", direct: "Files", media: "Media", galler
 function urlTable(u: UrlCaptures): Html {
   if (u.total === 0) return html`<span class="muted">none queued yet</span>`;
   const cols = URL_STATUSES.filter((s) => URL_KINDS.some((k) => u.byKind[k][s] > 0));
-  return html`${u.total} distinct URLs, each captured once however many messages link to it${u.wayback ? html`; ${u.wayback} from the Wayback Machine after the retries ran out` : ""}
+  return html`${u.total} distinct URLs, each captured once however many messages link to it${u.wayback ? html`; ${u.wayback} have a Wayback Machine snapshot, stored when our own capture failed` : ""}
 <table><tr><th></th>${cols.map((s) => html`<th>${s}</th>`)}</tr>
 ${URL_KINDS.map(
     (k) => html`<tr><th>${URL_KIND_LABELS[k]}</th>${cols.map((s) => html`<td>${u.byKind[k][s] || html`<span class="muted">0</span>`}</td>`)}</tr>`,
