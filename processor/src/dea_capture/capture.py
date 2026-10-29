@@ -16,6 +16,14 @@ Keys, with ``h = sha256(canonical URL)``:
 
 Only canonical URLs, which have tracking and auth parameters stripped, are
 stored here. The original hrefs stay in each issue's private files.
+
+Size limits: each kind has its own cap. A subscription can set a lower one
+(the dashboard writes them all to ``LIMITS_KEY``, in bytes by ``user/tag``).
+A record lists the subscriptions whose messages linked its URL; the most
+permissive of their limits applies, and none at all if any of them has none,
+or a message with no known subscription linked it (as with records from
+before there were limits). A capture deferred by a limit is queued again when
+a subscription with a higher limit, or none, links it.
 """
 
 from __future__ import annotations
@@ -42,6 +50,8 @@ Kind = Literal["page", "direct", "media", "gallery"]
 KINDS: tuple[Kind, ...] = ("page", "direct", "media", "gallery")
 Status = Literal["queued", "retrying", "ok", "failed", "refused", "deferred"]
 FINAL: frozenset[str] = frozenset({"ok", "failed", "refused", "deferred"})
+
+LIMITS_KEY = "config/capture-limits.json"
 
 # after the first attempt fails: retry 1 h, 6 h, 1 d, 7 d and 30 d later
 RETRY_AFTER = (
@@ -163,6 +173,7 @@ class Attempt:
     error: str | None = None
     capture: str | None = None
     rerouted_to: Kind | None = None  # the kind a "rerouted" attempt handed it on to
+    limit: int | None = None  # the subscription limit that deferred it, in bytes
 
 
 @dataclass
@@ -179,6 +190,9 @@ class CaptureRecord:
     # the due key that will run it next, while queued or retrying
     due: str | None = None
     wayback: dict[str, str] | None = None
+    # the subscriptions ("user/tag") whose messages linked it; None: one with
+    # no subscription did, so no subscription limit applies
+    subs: list[str] | None = None
 
     @classmethod
     def load(cls, data: bytes) -> CaptureRecord:
@@ -207,12 +221,58 @@ def _due(store: Store, kind: Kind, when: datetime, h: str) -> str:
     return key
 
 
-def queue(store: Store, canonical: str, kind: Kind, now: datetime) -> str:
-    """Queue ``canonical`` unless some issue already has. Returns its status:
-    ``new`` when this call queued it, else the record's current status."""
+def load_limits(store: Store) -> dict[str, int]:
+    """Subscriptions' size limits in bytes, by ``user/tag``."""
+    try:
+        doc = json.loads(store.get(LIMITS_KEY) or b"{}")
+    except ValueError:
+        return {}
+    got = doc.get("limits") if isinstance(doc, dict) else None
+    if not isinstance(got, dict):
+        return {}
+    return {k: v for k, v in got.items()
+            if isinstance(v, int) and not isinstance(v, bool) and v > 0}  # fmt: skip
+
+
+def size_limit(subs: list[str] | None, limits: Mapping[str, int]) -> int | None:
+    """The size limit for a capture linked by ``subs``: the highest of their
+    limits, or None if any of them has none."""
+    if not subs:
+        return None
+    got = [limits.get(s) for s in subs]
+    return None if None in got else max(g for g in got if g is not None)
+
+
+def _add_sub(rec: CaptureRecord, subscription: str | None) -> bool:
+    """Note that ``subscription`` links ``rec``; True if that changed it."""
+    if rec.subs is None or subscription in rec.subs:
+        return False
+    if subscription is None:
+        rec.subs = None
+    else:
+        rec.subs.append(subscription)
+    return True
+
+
+def _held_by_limit(rec: CaptureRecord, limits: Mapping[str, int]) -> bool:
+    """Deferred by a subscription limit that no longer applies."""
+    last = rec.attempts[-1] if rec.attempts else None
+    if rec.status != "deferred" or last is None or last.limit is None:
+        return False
+    now_limit = size_limit(rec.subs, limits)
+    return now_limit is None or now_limit > last.limit
+
+
+def queue(
+    store: Store, canonical: str, kind: Kind, now: datetime, subscription: str | None = None
+) -> str:
+    """Queue ``canonical`` unless some issue already has, for a message from
+    ``subscription`` (``user/tag``, or None if it has none). Returns its
+    status: ``new`` when this call queued it, else the record's current one."""
     h = url_hash(canonical)
     when = now.astimezone(UTC).isoformat(timespec="seconds")
-    rec = CaptureRecord(canonical, h, kind, "queued", when, when, due=due_key(kind, now, h))
+    rec = CaptureRecord(canonical, h, kind, "queued", when, when, due=due_key(kind, now, h),
+                        subs=[subscription] if subscription else None)  # fmt: skip
     if save(store, rec, if_absent=True):
         _due(store, kind, now, h)
         return "new"
@@ -223,6 +283,12 @@ def queue(store: Store, canonical: str, kind: Kind, now: datetime) -> str:
     # a crash between the claim and the due key would strand it
     if old.status in {"queued", "retrying"} and old.due and not store.exists(old.due):
         put_json(store, old.due, {"h": h, "kind": old.kind})
+    # not atomic: a capture finishing meanwhile can drop this subscription
+    if _add_sub(old, subscription) and old.status in {"queued", "retrying", "deferred"}:
+        if _held_by_limit(old, load_limits(store)):
+            old.status, old.updated_at = "queued", when
+            old.due = _due(store, old.kind, now, h)
+        save(store, old)
     return old.status
 
 
@@ -301,17 +367,18 @@ def run(
     save(store, rec)
     store.delete(key)
 
+    limit = size_limit(rec.subs, load_limits(store))
     if kind == "page":
         assert page_crawler is not None
-        attempt = capture_page(store, rec, page_crawler, now)
+        attempt = capture_page(store, rec, page_crawler, now, limit)
     elif kind == "media":
         assert media_grabber is not None
-        attempt = capture_media(store, rec, media_grabber, now)
+        attempt = capture_media(store, rec, media_grabber, now, limit=limit)
     elif kind == "gallery":
         assert gallery_collector is not None
-        attempt = capture_media(store, rec, gallery_collector, now, store_gallery)
+        attempt = capture_media(store, rec, gallery_collector, now, store_gallery, limit)
     else:
-        attempt = capture_direct(store, rec, fetcher, pacer, now)
+        attempt = capture_direct(store, rec, fetcher, pacer, now, limit)
     rec.attempts.append(attempt)
     rec.updated_at = attempt.at
     if attempt.outcome == "ok":
@@ -377,9 +444,17 @@ def _store_capture(
     return folder
 
 
+def _over_limit(at: str, size: int, limit: int | None, status: int | None) -> Attempt | None:
+    if limit is None or size <= limit:
+        return None
+    why = f"{size // 2**20} MiB, over the subscription's {limit // 2**20} MiB limit"
+    return Attempt(at, "deferred", status, why, limit=limit)
+
+
 def capture_direct(
-    store: Store, rec: CaptureRecord, fetcher: GuardedFetcher, pacer: HostPacer, now: datetime
-) -> Attempt:
+    store: Store, rec: CaptureRecord, fetcher: GuardedFetcher, pacer: HostPacer, now: datetime,
+    limit: int | None = None,
+) -> Attempt:  # fmt: skip
     at = _iso(now)
     pacer.wait(rec.canonical)
     try:
@@ -397,43 +472,50 @@ def capture_direct(
     kind = guess_kind(got.chain[-1], resp.headers.get("content-type"))
     if kind != "direct":
         return Attempt(at, "rerouted", resp.status, f"needs capture-{kind}", rerouted_to=kind)
+    if over := _over_limit(at, len(resp.body), limit, resp.status):
+        return over
     folder = _store_capture(store, rec, now, got.chain, resp.status, resp.headers, resp.body,
                             "direct")  # fmt: skip
     return Attempt(at, "ok", resp.status, capture=folder)
 
 
 def capture_page(
-    store: Store, rec: CaptureRecord, crawler: Callable[[str], PageOutcome], now: datetime
-) -> Attempt:
+    store: Store, rec: CaptureRecord, crawler: Callable[[str], PageOutcome], now: datetime,
+    limit: int | None = None,
+) -> Attempt:  # fmt: skip
     at = _iso(now)
     got = crawler(rec.canonical)
     if got.outcome == "refused":
         return Attempt(at, "refused", got.http_status, got.error)
     if got.outcome != "ok":
         return Attempt(at, "failed", got.http_status, got.error)
+    size = sum(len(b) for b in got.files.values())
+    if over := _over_limit(at, size, limit, got.http_status):
+        return over
     folder = capture_dir(rec.h, now)
     store_page(store, folder, rec.canonical, got, at)
     return Attempt(at, "ok", got.http_status, capture=folder)
 
 
-# takes the canonical URL, and what to call with a good outcome while its files exist
-MediaGrabber = Callable[[str, Callable[[MediaOutcome], None]], MediaOutcome]
+# takes the canonical URL, what to call with a good outcome while its files
+# exist, and the subscription's size limit, if any
+MediaGrabber = Callable[[str, Callable[[MediaOutcome], None], "int | None"], MediaOutcome]
 
 
 def capture_media(
     store: Store, rec: CaptureRecord, grabber: MediaGrabber, now: datetime,
-    keep: Callable[..., None] = store_media,
+    keep: Callable[..., None] = store_media, limit: int | None = None,
 ) -> Attempt:  # fmt: skip
     """capture-media, or capture-gallery with ``keep=store_gallery``: both hand
     anything they can't take to capture-page."""
     at = _iso(now)
     folder = capture_dir(rec.h, now)
-    got = grabber(rec.canonical, lambda g: keep(store, folder, rec.canonical, g, at))
+    got = grabber(rec.canonical, lambda g: keep(store, folder, rec.canonical, g, at), limit)
     if got.outcome == "ok":
         return Attempt(at, "ok", capture=folder)
     if got.outcome == "rerouted":
         return Attempt(at, "rerouted", error=got.error, rerouted_to="page")
-    return Attempt(at, got.outcome, error=got.error)
+    return Attempt(at, got.outcome, error=got.error, limit=limit if got.limited else None)
 
 
 def wayback_url(timestamp: str, original: str, mode: str = "") -> str:

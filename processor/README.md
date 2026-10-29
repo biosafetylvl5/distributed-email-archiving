@@ -163,6 +163,17 @@ over 100 MiB are `deferred`, and refusals by the guard are final. Failures
 (network errors, 4xx and 5xx) are retried 1 h, 6 h, 1 d, 7 d and 30 d
 later.
 
+Each kind has its own size cap. A subscription can also have a lower limit,
+set on the dashboard, which writes every subscription's limit to
+`config/capture-limits.json` (bytes by `user/tag`). A URL's record lists the
+subscriptions whose messages linked it. The highest of their limits applies,
+and no limit applies if any of them has none, or a message without a
+subscription linked it. Records from before limits existed have no limit. A
+capture over its limit is `deferred` with the limit noted on the attempt.
+Media and social posts stop downloading at the limit; pages and files are
+checked once fetched. If a subscription with a higher limit, or none, links
+a deferred URL later, it is queued again.
+
 A file or page that fails also gets the Wayback Machine snapshot closest to
 when the URL was first queued, found with the CDX API: at once if the site
 answered 401, 403, 429 or 451, else after the second failure (most one-off

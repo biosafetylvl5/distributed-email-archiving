@@ -6,7 +6,8 @@ else; from it:
 
 - a channel or playlist is not one post: it goes to capture-page instead;
 - a live or upcoming stream is retried later, once it's a recording;
-- a post whose chosen formats are estimated at more than ``MAX_BYTES`` is
+- a post whose chosen formats are estimated at more than ``MAX_BYTES``, or
+  the subscription's limit if that is lower (see ``capture.size_limit``), is
   deferred without downloading.
 
 The second run downloads the formats the first one chose (best up to 1080p, MP4 if it can),
@@ -80,7 +81,16 @@ class Grab:
     stats: ProxyStats = field(default_factory=ProxyStats)
 
 
-Grabber = Callable[[str, Path], Grab]
+# the URL, a work directory, and the subscription's size limit, if any
+Grabber = Callable[[str, Path, "int | None"], Grab]
+
+
+def size_cap(own: int, limit: int | None) -> tuple[int, str, bool]:
+    """A stage's cap, given its own and the subscription's ``limit``: the
+    bytes, how to say it, and whether the limit is the one that applies."""
+    if limit is not None and limit < own:
+        return limit, f"the subscription's {limit // 2**20} MiB limit", True
+    return own, f"the {own // 2**20} MiB cap", False
 
 
 def estimated_bytes(info: dict[str, Any]) -> int | None:
@@ -90,19 +100,22 @@ def estimated_bytes(info: dict[str, Any]) -> int | None:
     return sum(sizes) if all(isinstance(s, int) for s in sizes) else None
 
 
-def judge_probe(info: dict[str, Any]) -> tuple[Outcome, str] | None:
+def judge_probe(info: dict[str, Any], limit: int | None = None) -> tuple[Outcome, str] | None:
     """Why not to download this post, or None to go ahead."""
     if info.get("_type") in _COLLECTIONS:
         return "rerouted", "a channel or playlist, not one post"
     if info.get("live_status") in _LIVE or info.get("is_live"):
         return "failed", f"stream is {info.get('live_status') or 'live'}"
     size = estimated_bytes(info)
-    if size is not None and size > MAX_BYTES:
-        return "deferred", f"about {size // 2**20} MiB, over the {MAX_BYTES // 2**20} MiB cap"
+    cap, cap_text, _ = size_cap(MAX_BYTES, limit)
+    if size is not None and size > cap:
+        return "deferred", f"about {size // 2**20} MiB, over {cap_text}"
     return None
 
 
-def ytdlp_args(url: str, workdir: Path, proxy_port: int, *, probe: bool) -> list[str]:
+def ytdlp_args(
+    url: str, workdir: Path, proxy_port: int, *, probe: bool, max_bytes: int = MAX_BYTES
+) -> list[str]:
     common = [
         sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-playlist",
         "--proxy", f"http://127.0.0.1:{proxy_port}", "--js-runtimes", "node",
@@ -114,7 +127,7 @@ def ytdlp_args(url: str, workdir: Path, proxy_port: int, *, probe: bool) -> list
     return [
         *common, "--load-info-json", str(workdir / "probe.json"),
         # yt-dlp fetches every protocol itself; ffmpeg only merges
-        "--downloader", "native", "--max-filesize", str(MAX_BYTES),
+        "--downloader", "native", "--max-filesize", str(max_bytes),
         "--retries", "5", "--fragment-retries", "10",
         "--merge-output-format", "mp4/mkv", "--write-thumbnail", "--no-mtime",
         "-P", str(workdir / "out"), "-P", f"temp:{workdir / 'part'}",
@@ -167,8 +180,9 @@ def _last_error(workdir: Path, log: str, pattern: re.Pattern[str] = _ERROR) -> s
     return _URL.sub("<url>", found[-1])[:300] if found else None
 
 
-def run_ytdlp(url: str, workdir: Path, proxy: GuardProxy) -> Grab:
-    """Probe ``url`` with yt-dlp behind ``proxy``, then download it unless told not to."""
+def run_ytdlp(url: str, workdir: Path, proxy: GuardProxy, limit: int | None = None) -> Grab:
+    """Probe ``url`` with yt-dlp behind ``proxy``, then download it unless told
+    not to. ``limit``: the subscription's size limit, if any."""
     _become_subreaper()
     port = proxy.start()
     try:
@@ -182,11 +196,12 @@ def run_ytdlp(url: str, workdir: Path, proxy: GuardProxy) -> Grab:
         if not isinstance(info, dict):
             return Grab(None, None, exit_code=code, error=_last_error(workdir, "probe.log"),
                         stats=proxy.stats)  # fmt: skip
-        verdict = judge_probe(info)
+        verdict = judge_probe(info, limit)
         if verdict:
             return Grab(info, verdict, exit_code=code, stats=proxy.stats)
-        code = _run(ytdlp_args(url, workdir, port, probe=False), workdir, "download.log",
-                    DOWNLOAD_TIMEOUT, None)  # fmt: skip
+        cap = size_cap(MAX_BYTES, limit)[0]
+        code = _run(ytdlp_args(url, workdir, port, probe=False, max_bytes=cap), workdir,
+                    "download.log", DOWNLOAD_TIMEOUT, None)  # fmt: skip
     finally:
         proxy.stop()
     out = workdir / "out"
@@ -201,6 +216,7 @@ class MediaOutcome:
     files: dict[str, Path] = field(default_factory=dict)  # stored name -> file
     info: dict[str, Any] = field(default_factory=dict)  # for info.json
     details: dict[str, Any] = field(default_factory=dict)  # for capture.json
+    limited: bool = False  # deferred by the subscription's size limit, not the stage's cap
 
 
 def _ytdlp_version() -> str:
@@ -212,27 +228,29 @@ def _ytdlp_version() -> str:
 
 def grab_media(
     canonical: str, grabber: Grabber, keep: Callable[[MediaOutcome], None],
-    extra_blocked: Sequence[IPNetwork] = (),
+    extra_blocked: Sequence[IPNetwork] = (), limit: int | None = None,
 ) -> MediaOutcome:  # fmt: skip
     """Grab ``canonical`` into a temporary directory and judge the result. ``keep``
-    is called with a good outcome while its files still exist."""
+    is called with a good outcome while its files still exist. ``limit``: the
+    subscription's size limit, if any."""
+    cap, cap_text, limited = size_cap(MAX_BYTES, limit)
     try:
         check_link(canonical)
         check_destination(canonical, extra_blocked=extra_blocked)
     except ForbiddenFetch as exc:
         return MediaOutcome("refused", str(exc))
     with tempfile.TemporaryDirectory(prefix="dea-media-") as tmp:
-        g = grabber(canonical, Path(tmp))
+        g = grabber(canonical, Path(tmp), limit)
         if g.verdict:
-            return MediaOutcome(*g.verdict)
+            return MediaOutcome(*g.verdict, limited=limited and g.verdict[0] == "deferred")
         if g.info is None:
             return MediaOutcome("failed", g.error or f"yt-dlp exit {g.exit_code}, no metadata")
         media = [p for p in g.files if p.stem == "media"]
         if g.exit_code != 0 or len(media) != 1:
             why = "timed out" if g.exit_code is None else f"exit {g.exit_code}"
             return MediaOutcome("failed", g.error or f"yt-dlp {why}, no file")
-        if media[0].stat().st_size > MAX_BYTES:
-            return MediaOutcome("deferred", f"over the {MAX_BYTES // 2**20} MiB cap")
+        if media[0].stat().st_size > cap:
+            return MediaOutcome("deferred", f"over {cap_text}", limited=limited)
         files = {f"media{media[0].suffix}": media[0]}
         thumbs = [p for p in g.files if p.stem == "thumbnail"]
         if thumbs:

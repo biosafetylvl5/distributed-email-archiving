@@ -93,7 +93,7 @@ def test_ytdlp_args_keep_it_behind_the_proxy(tmp_path: Path) -> None:
 
 
 def fake_grabber(**grab: Any) -> media.Grabber:
-    def grabber(url: str, workdir: Path) -> Grab:
+    def grabber(url: str, workdir: Path, limit: int | None = None) -> Grab:
         assert url == URL
         files = []
         for name in grab.pop("make", []):
@@ -237,7 +237,7 @@ def _guarded() -> GuardedFetcher:
 
 
 def _grabber(grab: media.Grabber) -> Any:
-    return lambda url, keep: grab_media(url, grab, keep)
+    return lambda url, keep, limit: grab_media(url, grab, keep, limit=limit)
 
 
 def test_run_media_ok(tmp_path: Path) -> None:

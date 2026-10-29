@@ -101,7 +101,7 @@ def test_scrub_drops_signed_query_strings() -> None:
 
 
 def fake_collector(**haul: Any) -> gallery.Collector:
-    def collector(url: str, workdir: Path) -> Haul:
+    def collector(url: str, workdir: Path, limit: int | None = None) -> Haul:
         assert url == URL
         files: list[tuple[Path, dict[str, Any]]] = []
         for name in haul.pop("make", []):
@@ -141,7 +141,7 @@ def test_collect_a_text_only_post() -> None:
         ({"exit_code": 4, "post": None, "error": "HttpError: '503 Service Unavailable'"},
          "failed", "HttpError: '503 Service Unavailable'"),
         ({"exit_code": None, "post": None}, "failed", "timed out"),
-        ({"exit_code": None, "over_cap": True}, "deferred", "over 3072 MiB"),
+        ({"exit_code": None, "over_cap": True}, "deferred", "over the 3072 MiB cap"),
         ({"exit_code": 0, "post": None}, "failed", "gallery-dl exit 0"),
     ],
 )  # fmt: skip
@@ -234,7 +234,7 @@ def _guarded() -> GuardedFetcher:
 
 
 def _collector(c: gallery.Collector) -> Any:
-    return lambda url, keep: collect(url, c, keep)
+    return lambda url, keep, limit: collect(url, c, keep, limit=limit)
 
 
 def _rec(store: LocalStore) -> CaptureRecord:

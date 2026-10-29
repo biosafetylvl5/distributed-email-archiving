@@ -132,6 +132,30 @@ describe("subscriptions", () => {
     expect(tags.json("ann/ramen_weekly")).toEqual({ status: "blocked", publish: true, note: "spammy", custom: 1 });
   });
 
+  it("sets a capture size limit and mirrors every limit to R2 for dea-capture", async () => {
+    const { env, users, tags, archive } = fakeEnv();
+    await users.put("ann", JSON.stringify({ active: true }));
+    await tags.put("ann/other", JSON.stringify({ status: "approved", capture_limit_mb: 50 }));
+    await post(env, "/users/ann/tags", { tag: "ramen", status: "approved", capture_limit_mb: "200" });
+    expect(tags.json("ann/ramen")).toMatchObject({ capture_limit_mb: 200 });
+    const mirror = async () => JSON.parse(await (await archive.get("config/capture-limits.json"))!.text());
+    expect((await mirror()).limits).toEqual({ "ann/other": 50 * 2 ** 20, "ann/ramen": 200 * 2 ** 20 });
+    expect(await (await get(env, "/users/ann")).text()).toContain("captures up to 200 MiB");
+
+    // the short form leaves it alone; blank clears it
+    await post(env, "/users/ann/tags", { tag: "ramen", status: "blocked" });
+    expect(tags.json("ann/ramen")).toMatchObject({ capture_limit_mb: 200 });
+    await post(env, "/users/ann/tags", { tag: "ramen", status: "approved", capture_limit_mb: "" });
+    expect(tags.json("ann/ramen")).not.toHaveProperty("capture_limit_mb");
+    expect((await mirror()).limits).toEqual({ "ann/other": 50 * 2 ** 20 });
+
+    for (const bad of ["0", "1.5", "-3", "lots", String(2 * 1024 * 1024)]) {
+      const res = await post(env, "/users/ann/tags", { tag: "ramen", status: "approved", capture_limit_mb: bad });
+      expect(new URLSearchParams((res.headers.get("location") ?? "").split("?")[1]).get("err"), bad).toContain("Invalid capture size limit");
+    }
+    expect(tags.json("ann/ramen")).not.toHaveProperty("capture_limit_mb");
+  });
+
   it("validates tag, status, sender domain and user", async () => {
     const { env, users, tags } = fakeEnv();
     await users.put("ann", JSON.stringify({ active: true }));

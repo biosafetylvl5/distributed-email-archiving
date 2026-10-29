@@ -5,7 +5,8 @@ It saves the post's files at their original resolution, each file's metadata,
 and the post's own (``info.json``: its text, author, date and counts). A post
 whose site wants a login, or that gallery-dl has no extractor for, goes to
 capture-page instead. At most ``MAX_FILES`` files and ``MAX_BYTES`` in all are
-kept; a post that grows past that while downloading is deferred.
+kept, or less if the subscription's limit is lower (see ``capture.size_limit``);
+a post that grows past that while downloading is deferred.
 
 Stored in the attempt's folder under ``captures/<h[:2]>/<h>/<stamp>/``:
 ``files/001.<ext>``... in the post's order, ``info.json`` (``post``: the
@@ -31,7 +32,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from . import __version__
 from .guard import ForbiddenFetch, IPNetwork, check_destination, check_link
-from .media import _TYPES, MediaOutcome, _describe, _last_error, _run
+from .media import _TYPES, MediaOutcome, _describe, _last_error, _run, size_cap
 from .page import _become_subreaper
 from .proxy import GuardProxy, ProxyStats
 from .store import Store, put_json
@@ -60,7 +61,8 @@ class Haul:
     stats: ProxyStats = field(default_factory=ProxyStats)
 
 
-Collector = Callable[[str, Path], Haul]
+# the URL, a work directory, and the subscription's size limit, if any
+Collector = Callable[[str, Path, "int | None"], Haul]
 
 
 def gallerydl_args(url: str, workdir: Path, proxy_port: int) -> list[str]:
@@ -93,22 +95,24 @@ def _size(folder: Path) -> int:
     return sum(p.stat().st_size for p in folder.rglob("*") if p.is_file())
 
 
-def run_gallerydl(url: str, workdir: Path, proxy: GuardProxy) -> Haul:
-    """Download ``url``'s post with gallery-dl behind ``proxy``."""
+def run_gallerydl(url: str, workdir: Path, proxy: GuardProxy, limit: int | None = None) -> Haul:
+    """Download ``url``'s post with gallery-dl behind ``proxy``, stopping
+    over ``MAX_BYTES`` or the subscription's ``limit``."""
+    cap = size_cap(MAX_BYTES, limit)[0]
     _become_subreaper()
     out = workdir / "out"
     out.mkdir()
     port = proxy.start()
     try:
         code = _run(gallerydl_args(url, workdir, port), workdir, "gallery-dl.log", TIMEOUT,
-                    None, stop=lambda: _size(out) > MAX_BYTES)  # fmt: skip
+                    None, stop=lambda: _size(out) > cap)  # fmt: skip
     finally:
         proxy.stop()
     files = sorted((p for p in out.iterdir() if p.is_file() and p.suffix != ".json"), key=_natural)
     return Haul(
         code, _load(out / "info.json"),
         [(p, _load(p.with_name(p.name + ".json")) or {}) for p in files],
-        over_cap=_size(out) > MAX_BYTES,
+        over_cap=_size(out) > cap,
         error=_last_error(workdir, "gallery-dl.log", _ERROR), stats=proxy.stats,
     )  # fmt: skip
 
@@ -141,20 +145,22 @@ def _gallerydl_version() -> str:
 
 def collect(
     canonical: str, collector: Collector, keep: Callable[[MediaOutcome], None],
-    extra_blocked: Sequence[IPNetwork] = (),
+    extra_blocked: Sequence[IPNetwork] = (), limit: int | None = None,
 ) -> MediaOutcome:  # fmt: skip
     """Collect ``canonical``'s post into a temporary directory and judge the
-    result. ``keep`` is called with a good outcome while its files still exist."""
+    result. ``keep`` is called with a good outcome while its files still exist.
+    ``limit``: the subscription's size limit, if any."""
+    _, cap_text, limited = size_cap(MAX_BYTES, limit)
     try:
         check_link(canonical)
         check_destination(canonical, extra_blocked=extra_blocked)
     except ForbiddenFetch as exc:
         return MediaOutcome("refused", str(exc))
     with tempfile.TemporaryDirectory(prefix="dea-gallery-") as tmp:
-        h = collector(canonical, Path(tmp))
+        h = collector(canonical, Path(tmp), limit)
         why = h.error or ("timed out" if h.exit_code is None else f"gallery-dl exit {h.exit_code}")
         if h.over_cap:
-            return MediaOutcome("deferred", f"over {MAX_BYTES // 2**20} MiB")
+            return MediaOutcome("deferred", f"over {cap_text}", limited=limited)
         code = h.exit_code or 0
         if code & EXIT_NO_EXTRACTOR:
             return MediaOutcome("rerouted", "not a post gallery-dl knows")

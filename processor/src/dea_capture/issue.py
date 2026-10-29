@@ -223,6 +223,7 @@ def process_issue(
     force: bool = False,
     pacer: HostPacer | None = None,
     make_resolver: Callable[[Inventory], GuardedFetcher] | None = None,
+    subscription: str | None = None,
 ) -> IssueResult:
     sha = hashlib.sha256(raw).hexdigest()
     pacer = pacer or HostPacer()
@@ -236,7 +237,8 @@ def process_issue(
                 links = json.loads(links_data) if links_data else None
                 if make_resolver is not None and not store.exists(captures_key(sha)):
                     inv = inventory(raw)
-                    doc = process_links(sha, inv, store, make_resolver(inv), pacer=pacer)
+                    doc = process_links(sha, inv, store, make_resolver(inv), pacer=pacer,
+                                        subscription=subscription)  # fmt: skip
                     write_status(store, sha, old, links, doc)
                     line = _link_line(doc)
                     _view(store, sha, raw, old, doc, line)
@@ -320,7 +322,8 @@ def process_issue(
     put_json(store, manifest_key(sha), manifest)
     captures = None if force else load_links(store, sha)
     if make_resolver is not None and captures is None:
-        captures = process_links(sha, inv, store, make_resolver(inv), pacer=pacer)
+        captures = process_links(sha, inv, store, make_resolver(inv), pacer=pacer,
+                                 subscription=subscription)  # fmt: skip
         counts.update(_link_line(captures))
     write_status(store, sha, manifest, links_doc, captures)
     _view(store, sha, raw, manifest, captures, counts)

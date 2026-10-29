@@ -79,8 +79,11 @@ def process_links(
     *,
     now: datetime | None = None,
     pacer: HostPacer | None = None,
+    subscription: str | None = None,
 ) -> dict[str, Any]:
     """Resolve and queue one issue's links; returns the ``captures.json`` doc.
+    ``subscription``: the message's ``user/tag``, which sets capture size
+    limits (see ``capture.size_limit``).
 
     ``resolver`` must read headers only; its ``refused_urls`` must come from
     this message's inventory.
@@ -94,9 +97,10 @@ def process_links(
         if link.href in seen:
             continue
         seen.add(link.href)
-        records.append(_link_record(link, store, resolver, pacer, now, queued))
+        records.append(_link_record(link, store, resolver, pacer, now, queued, subscription))
     doc = {
         "sha256": sha,
+        "subscription": subscription,
         "links_version": LINKS_VERSION,
         "completed_at": _stamp(now),
         "links": [asdict(r) for r in records],
@@ -111,7 +115,7 @@ def _stamp(now: datetime) -> str:
 
 def _link_record(
     link: Classified, store: Store, resolver: GuardedFetcher, pacer: HostPacer, now: datetime,
-    queued: dict[str, str],
+    queued: dict[str, str], subscription: str | None = None,
 ) -> LinkRecord:  # fmt: skip
     """Resolve (if need be) and queue one link. ``queued``: what queueing
     found per URL hash in this issue so far, so each is queued once."""
@@ -133,7 +137,7 @@ def _link_record(
         rec.h = url_hash(rec.canonical)
         rec.kind = guess_kind(rec.canonical, content_type)
         if rec.h not in queued:
-            queued[rec.h] = queue(store, rec.canonical, rec.kind, now)
+            queued[rec.h] = queue(store, rec.canonical, rec.kind, now, subscription)
         rec.queued = queued[rec.h]
     return rec
 
@@ -175,7 +179,7 @@ def retry_unresolved(
             got.out_of_time = True
             break
         got.tried += 1
-        rec = _link_record(link, store, resolver, pacer, now, queued)
+        rec = _link_record(link, store, resolver, pacer, now, queued, doc.get("subscription"))
         if rec.http_status == 429 and rec.outcome == "failed":
             got.rate_limited = True
             break

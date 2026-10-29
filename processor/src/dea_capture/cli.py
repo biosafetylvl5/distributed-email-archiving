@@ -59,6 +59,7 @@ def _extra_blocked() -> list[IPNetwork]:
 def _cmd_issue(args: argparse.Namespace) -> int:
     source: str = args.source
     store: Store
+    subscription = None
     if source.startswith("s3://"):
         bucket, key = split_s3_uri(source)
         s3 = S3Store(bucket)
@@ -66,6 +67,7 @@ def _cmd_issue(args: argparse.Namespace) -> int:
         if raw is None:
             print(f"ISSUE missing source object {key}", file=sys.stderr)
             return 1
+        subscription = _subscription(s3.metadata(key) or {})
         store = LocalStore(Path(args.out)) if args.out else s3
     else:
         raw = Path(source).read_bytes()
@@ -92,10 +94,16 @@ def _cmd_issue(args: argparse.Namespace) -> int:
 
     result = process_issue(
         raw, store, make_fetcher, source=source, force=args.force,
-        make_resolver=None if args.no_links else make_resolver,
+        make_resolver=None if args.no_links else make_resolver, subscription=subscription,
     )  # fmt: skip
     print(result.line())
     return 0
+
+
+def _subscription(meta: dict[str, str]) -> str | None:
+    """The ``user/tag`` the ingest Worker filed a message under, if it had a tag."""
+    user, tag = meta.get("user", ""), meta.get("tag", "")
+    return f"{user}/{tag}" if user and tag else None
 
 
 def _user_agent() -> str:
@@ -131,17 +139,17 @@ def _page_crawler(blocked: list[IPNetwork]) -> Callable[[str], page.PageOutcome]
 
 
 def _media_grabber(blocked: list[IPNetwork]) -> capture.MediaGrabber:
-    def grabber(url: str, workdir: Path) -> media.Grab:
-        return media.run_ytdlp(url, workdir, GuardProxy(extra_blocked=blocked))
+    def grabber(url: str, workdir: Path, limit: int | None) -> media.Grab:
+        return media.run_ytdlp(url, workdir, GuardProxy(extra_blocked=blocked), limit)
 
-    return lambda url, keep: media.grab_media(url, grabber, keep, blocked)
+    return lambda url, keep, limit: media.grab_media(url, grabber, keep, blocked, limit)
 
 
 def _gallery_collector(blocked: list[IPNetwork]) -> capture.MediaGrabber:
-    def collector(url: str, workdir: Path) -> gallery.Haul:
-        return gallery.run_gallerydl(url, workdir, GuardProxy(extra_blocked=blocked))
+    def collector(url: str, workdir: Path, limit: int | None) -> gallery.Haul:
+        return gallery.run_gallerydl(url, workdir, GuardProxy(extra_blocked=blocked), limit)
 
-    return lambda url, keep: gallery.collect(url, collector, keep, blocked)
+    return lambda url, keep, limit: gallery.collect(url, collector, keep, blocked, limit)
 
 
 def _cmd_media(args: argparse.Namespace) -> int:
@@ -153,7 +161,7 @@ def _cmd_media(args: argparse.Namespace) -> int:
         (_gallery_collector(blocked), gallery.store_gallery) if args.gallery
         else (_media_grabber(blocked), media.store_media)
     )  # fmt: skip
-    got = grab(args.url, lambda g: keep(LocalStore(out), "", args.url, g, at))
+    got = grab(args.url, lambda g: keep(LocalStore(out), "", args.url, g, at), None)
     summary = {
         "outcome": got.outcome, "error": got.error, "files": sorted(got.files),
         "duration": got.info.get("duration"), "format": got.info.get("format"), **got.details,

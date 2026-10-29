@@ -49,6 +49,7 @@ import {
   promote,
   putTag,
   setUserActive,
+  syncCaptureLimits,
   today,
   usageForDay,
   type TagEntry,
@@ -69,6 +70,7 @@ const HOSTNAME_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{
 const NAME_MAX = 200;
 const DESCRIPTION_MAX = 2000;
 const NOTE_MAX = 500;
+const CAPTURE_LIMIT_MAX_MB = 1024 * 1024; // 1 TiB: anything over is a typo
 const TEXT_FIELDS = ["name", "description", "sender_domain", "signup_url", "note"] as const;
 type TextField = (typeof TEXT_FIELDS)[number];
 
@@ -568,6 +570,7 @@ ${fromSubscriptions ? html`<input type="hidden" name="back" value="subscriptions
 <label>Sender domain <input type="text" name="sender_domain" value="${r?.sender_domain ?? ""}" placeholder="optional; other senders are quarantined"></label>
 <label>Sign-up link <input type="url" name="signup_url" value="${r?.signup_url ?? ""}" placeholder="https://..."></label>
 <label>Private note <input type="text" name="note" value="${r?.note ?? ""}" maxlength="${NOTE_MAX}"></label>
+<label>Capture size limit (MiB) <input type="number" name="capture_limit_mb" min="1" max="${CAPTURE_LIMIT_MAX_MB}" step="1" value="${r?.capture_limit_mb ?? ""}" placeholder="none"></label>
 </div></details>
 <button>Save</button></form>`;
 }
@@ -591,6 +594,10 @@ ${tags.map(
 <td>${tagSummary(t)}</td>
 <td class="status-${t.record?.status ?? ""}">${t.record?.status ?? "unreadable"}${t.record?.publish ? " · publish" : ""}${
     t.record?.sender_domain ? html`<br><span class="muted">from ${t.record.sender_domain}</span>` : ""
+  }${
+    t.record?.capture_limit_mb
+      ? html`<br><span class="muted">captures up to ${t.record.capture_limit_mb} MiB</span>`
+      : ""
   }</td>
 <td><code>${address(ctx.env, t.user, t.tag)}</code></td><td>${tagForm(t, withUser)}</td></tr>`,
 )}</table>`;
@@ -645,6 +652,11 @@ async function saveTag(ctx: Ctx, user: string): Promise<Response> {
   if (signupUrl && !isSignupUrl(signupUrl)) {
     return redirect(back, { err: `Invalid sign-up link (must be http or https): ${signupUrl}` });
   }
+  const limitText = field(form, "capture_limit_mb");
+  const limit = limitText ? Number(limitText) : undefined;
+  if (limit !== undefined && !(Number.isInteger(limit) && limit >= 1 && limit <= CAPTURE_LIMIT_MAX_MB)) {
+    return redirect(back, { err: `Invalid capture size limit (whole MiB, 1 to ${CAPTURE_LIMIT_MAX_MB}): ${limitText}` });
+  }
   const text: Record<TextField, string> = {
     name: field(form, "name").replace(/\s+/g, " ").slice(0, NAME_MAX),
     description: field(form, "description").replace(/\r\n?/g, "\n").slice(0, DESCRIPTION_MAX),
@@ -666,7 +678,12 @@ async function saveTag(ctx: Ctx, user: string): Promise<Response> {
     if (text[key]) next[key] = text[key];
     else delete next[key];
   }
+  if (form.has("capture_limit_mb")) {
+    if (limit === undefined) delete next.capture_limit_mb;
+    else next.capture_limit_mb = limit;
+  }
   await putTag(ctx.env, user, tag, next);
+  if (next.capture_limit_mb !== current.capture_limit_mb) await syncCaptureLimits(ctx.env);
   return redirect(back, { msg: `Saved ${user}/${tag} (${status})` });
 }
 

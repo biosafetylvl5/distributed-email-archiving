@@ -96,7 +96,8 @@ Accepted mail is written to the `newsletter-archive` R2 bucket under
 The ingest Worker also serves a small dashboard (`src/admin/`) for:
 
 - **Users:** list, add, disable or enable
-- **Subscriptions:** approve, mark pending, block or publish tags; set a name, description, sender domain, sign-up link and private note
+- **Subscriptions:** approve, mark pending, block or publish tags; set a name, description, sender domain, sign-up link, private note and an
+  optional capture size limit (see the processor's README)
 - **Settings:** override `POLICY_MODE`, the size limit and the daily caps without redeploying
   (stored in the `SETTINGS` KV namespace; blank falls back to `wrangler.toml`)
 - **Quarantine:** the 50 most recent quarantined messages, with view source (as plain text),

@@ -29,6 +29,10 @@ export interface TagRecord {
   sender_domain?: string;
   // Eligible for the delayed publication pipeline (processor `publish` pass).
   publish?: boolean;
+  // Most each link capture from this newsletter may take, in MiB (dea-capture
+  // defers bigger ones); mirrored to R2 for it by the dashboard. None: the
+  // capture stages' own caps.
+  capture_limit_mb?: number;
   // Admin metadata below; ingest ignores it.
   name?: string; // display name, e.g. "Ramen Weekly"
   description?: string;

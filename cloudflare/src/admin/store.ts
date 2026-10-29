@@ -69,6 +69,26 @@ export async function listTags(env: Env, user?: string): Promise<TagEntry[]> {
   );
 }
 
+// dea-capture reads subscriptions' capture size limits from here (it has
+// no KV access); rewritten whole on every subscription save
+export const CAPTURE_LIMITS_KEY = "config/capture-limits.json";
+
+export function captureLimits(tags: TagEntry[]): Record<string, number> {
+  const limits: Record<string, number> = {};
+  for (const t of tags) {
+    const mb = t.record?.capture_limit_mb;
+    if (typeof mb === "number" && Number.isInteger(mb) && mb > 0) limits[`${t.user}/${t.tag}`] = mb * 2 ** 20;
+  }
+  return limits;
+}
+
+export async function syncCaptureLimits(env: Env): Promise<void> {
+  const limits = captureLimits(await listTags(env));
+  await env.ARCHIVE.put(CAPTURE_LIMITS_KEY, JSON.stringify({ updated_at: new Date().toISOString(), limits }), {
+    httpMetadata: { contentType: "application/json" },
+  });
+}
+
 export async function getTag(env: Env, user: string, tag: string): Promise<TagRecord | null> {
   return getJson<TagRecord>(env.TAGS, `${user}/${tag}`);
 }
