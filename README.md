@@ -110,8 +110,12 @@ The ingest Worker also serves a small dashboard (`src/admin/`) for:
   parts and what it takes up in storage, plus view source and download. Embeds are the
   stored copies and links point where they lead, never through a tracker. The view is served
   into a sandboxed frame whose CSP allows no scripts and nothing from another origin
+- **Storage:** what the bucket holds by area and by kind of link capture, and its 100
+  largest files, each linked to open it (video, audio, images and text in the browser,
+  anything else as a download), to the page it captured, or to its message. Counted
+  hourly by the processor
 - **Overview:** totals, capture progress (including every linked URL by kind and status),
-  storage by area (counted hourly by the processor) and today's usage against the daily caps
+  storage by area and today's usage against the daily caps
 
 The overview and captures pages read `dashboard/summary.json`, which the
 [processor](processor/README.md) rebuilds every 5 minutes, and say how old it is. Listing

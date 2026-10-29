@@ -54,6 +54,7 @@ const NAV = [
   ["/settings", "Settings"],
   ["/quarantine", "Quarantine"],
   ["/captures", "Captures"],
+  ["/storage", "Storage"],
 ];
 
 const CSS = `

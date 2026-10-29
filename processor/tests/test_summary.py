@@ -230,3 +230,30 @@ def test_storage_by_area_kind_and_message(tmp_path: Path) -> None:
     assert later["storage_listed"] is False and load(store)["storage"]["messages"] == {SHA: 28}
     later = summary.build(store, now=lambda: NOW + summary.STORAGE_EVERY, workers=2)
     assert later["storage_listed"] is True and load(store)["storage"]["messages"] == {SHA: 29}
+
+
+def test_largest_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(summary, "LARGEST", 3)
+    store = LocalStore(tmp_path)
+    seed(store)  # captures/index/<0>.json is a page, with no body worth reading
+    h = "e" * 64
+    store.put(f"captures/index/{h}.json", json.dumps({"canonical": "https://video.example.com/v/1"}).encode(),
+              "application/json", metadata={"kind": "media", "status": "ok"})  # fmt: skip
+    store.put(f"captures/ee/{h}/20261027T000000Z/media.mp4", b"m" * 500, "video/mp4")
+    store.put(f"captures/ee/{h}/20261027T000000Z/info.json", b"i" * 2, "application/json")
+    store.put(f"issues/{SHA}/assets/{'c' * 64}.png", b"p" * 300, "image/png")
+    store.put(f"captures/ff/{'f' * 64}/20261027T000000Z/page.wacz", b"w" * 200, "application/zip")
+    summary.build(store, now=lambda: NOW, workers=2)
+    got = json.loads(store.get(summary.LARGEST_KEY) or b"")
+    assert got["computed_at"] == "2026-10-27T12:00:00+00:00"
+    files = got["files"]
+    assert [(f["size"], f["area"]) for f in files] == [
+        (500, "captures"),
+        (300, "embeds"),
+        (200, "captures"),
+    ]
+    assert files[0]["kind"] == "media" and files[0]["url"] == "https://video.example.com/v/1"
+    assert files[1]["sha"] == SHA and "url" not in files[1]
+    assert files[2]["kind"] == "unknown" and "url" not in files[2]
+    # the summary itself carries no URLs
+    assert "video.example.com" not in (store.get(summary.SUMMARY_KEY) or b"").decode()

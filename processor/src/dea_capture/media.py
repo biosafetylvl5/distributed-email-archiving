@@ -44,7 +44,7 @@ from .page import _become_subreaper, _end_group
 from .proxy import GuardProxy, ProxyStats
 from .store import Store, put_json
 
-MAX_BYTES = 3 * 1024**3
+MAX_BYTES = 1024**3
 # best up to 1080p, preferring MP4 and M4A streams, which merge into a file
 # browsers play
 FORMAT_SORT = "res:1080,ext"

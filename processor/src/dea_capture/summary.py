@@ -17,6 +17,12 @@ listing the bucket, which costs more CPU than a Worker on the free plan has.
   ``issues/<sha>/`` in bytes. Listing every object takes a while, so this is
   redone every ``STORAGE_EVERY``, and kept in the state in between.
 
+With each storage count, ``dashboard/largest.json`` lists the ``LARGEST``
+biggest objects: key, size, area, and for a link capture its kind and the
+URL captured (from its index record), for a message's file the message. It's
+a separate object, read only by the dashboard's storage page, so the summary
+stays small and has no URLs.
+
 It is written compact, since the Worker parses it on every page view. It is
 rebuilt from listings, so deleted objects drop out. Metadata is read
 (a HEAD request) only for objects whose ETag changed since the last run; the
@@ -25,6 +31,7 @@ ETags and metadata seen are kept in ``dashboard/summary-state.json``.
 
 from __future__ import annotations
 
+import heapq
 import json
 import re
 from collections.abc import Callable
@@ -41,6 +48,8 @@ RETRY_REQUESTS = "captures/retry/"
 RETRY_RESULTS = "dashboard/retries.json"
 VERSION = 1
 STORAGE_EVERY = timedelta(hours=1)
+LARGEST_KEY = "dashboard/largest.json"
+LARGEST = 100
 # the parts of the bucket the dashboard shows the size of
 AREAS = ("archive", "quarantine", "embeds", "views", "link_records", "captures",
          "capture_index", "queue", "dashboard", "other")  # fmt: skip
@@ -109,13 +118,45 @@ def _area(parts: list[str]) -> str:
     return "dashboard" if top == "dashboard" else "other"
 
 
+def _largest(store: Store, biggest: list[tuple[int, str, Listed]],
+             index: dict[str, dict[str, str]], now: datetime) -> dict[str, Any]:  # fmt: skip
+    """The biggest objects, largest first, with what they belong to."""
+    files = []
+    for _, _, o in sorted(biggest, key=lambda t: (-t[0], t[1])):
+        parts = o.key.split("/")
+        area = _area(parts)
+        f: dict[str, Any] = {"key": o.key, "size": o.size, "modified": _iso(o.modified),
+                             "area": area}  # fmt: skip
+        if area == "captures" and len(parts) > 3:
+            ix = f"captures/index/{parts[2]}.json"
+            f["kind"] = index.get(ix, {}).get("kind", "unknown")
+            try:
+                url = json.loads(store.get(ix) or b"{}").get("canonical")
+            except (ValueError, AttributeError):
+                url = None
+            if isinstance(url, str) and url.startswith(("http://", "https://")):
+                f["url"] = url
+        elif parts[0] == "issues" and len(parts) > 2:
+            f["sha"] = parts[1]
+        elif area in ("archive", "quarantine"):
+            f["sha"] = parts[-1].removesuffix(".eml")
+        files.append(f)
+    return {"computed_at": _iso(now), "files": files}
+
+
 def _storage(store: Listable, index: dict[str, dict[str, str]], now: datetime) -> dict[str, Any]:
     """Objects and bytes by area, link captures by kind (from ``index``, each
-    index record's metadata) and each message's ``issues/<sha>/`` bytes."""
+    index record's metadata) and each message's ``issues/<sha>/`` bytes.
+    Writes ``LARGEST_KEY`` as well."""
     areas = {a: {"count": 0, "bytes": 0} for a in AREAS}
     kinds: dict[str, dict[str, Any]] = {}
     messages: dict[str, int] = {}
+    biggest: list[tuple[int, str, Listed]] = []  # a min-heap of the LARGEST
     for o in store.listing(""):
+        if len(biggest) < LARGEST:
+            heapq.heappush(biggest, (o.size, o.key, o))
+        elif o.size > biggest[0][0]:
+            heapq.heapreplace(biggest, (o.size, o.key, o))
         parts = o.key.split("/")
         area = _area(parts)
         areas[area]["count"] += 1
@@ -128,6 +169,7 @@ def _storage(store: Listable, index: dict[str, dict[str, str]], now: datetime) -
             k["count"] += 1
             k["bytes"] += o.size
             k["urls"].add(parts[2])
+    _put_compact(store, LARGEST_KEY, _largest(store, biggest, index, now))
     return {
         "computed_at": _iso(now),
         "areas": areas,

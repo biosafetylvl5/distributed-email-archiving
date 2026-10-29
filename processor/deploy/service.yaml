@@ -182,10 +182,10 @@ spec:
         kind: dispatcher
         name: local_dispatcher
         config:
-          # one post at a time: up to 3 GiB of parts, and the merged file, on /tmp
+          # one post at a time: up to 1 GiB of parts, and the merged file, on /tmp
           max_workers: 1
           # yt-dlp is killed after 5 minutes probing and 90 downloading; this
-          # leaves time to upload 3 GiB
+          # leaves time to upload 1 GiB
           timeout_seconds: 7200
           log_to_logger: true
     - watch-gallery:

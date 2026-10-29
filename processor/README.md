@@ -186,7 +186,7 @@ DIR` captures one page locally, in the container image.
 Media keys (video sites, audio and video files) go to yt-dlp behind the same
 proxy. It first reads the post's metadata only. A channel or playlist moves
 to the `page` queue, a live or upcoming stream is retried later, and a post
-estimated at more than 3 GiB (best format up to 1080p) is `deferred`. Then it
+estimated at more than 1 GiB (best format up to 1080p) is `deferred`. Then it
 downloads with its own downloader for every protocol, so ffmpeg only merges
 files on disk. The folder gets `media.<ext>`, `thumbnail.<ext>`, `info.json`
 (the post's metadata, without signed format URLs or request headers) and
@@ -230,8 +230,8 @@ pinned to a commit (the `service` extra). GitHub Actions publishes
 touches `processor/`, after `deploy/smoke-page.py` passes inside the image:
 the browser, yt-dlp and gallery-dl can't reach a server on loopback, and a real page
 captures. One page capture at a time wants about 2 CPUs and 2 GiB of memory,
-and up to 1 GiB in `/tmp`; one media capture up to about 6 GiB in `/tmp`
-while it merges a 3 GiB post.
+and up to 1 GiB in `/tmp`; one media capture up to about 2 GiB in `/tmp`
+while it merges a 1 GiB post, and a social post up to about 3 GiB.
 
 Courier never restarts a crashed plugin, and the process keeps looking
 healthy. Use `dea-capture healthcheck` as the liveness probe. It fails

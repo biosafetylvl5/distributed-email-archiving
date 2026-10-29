@@ -26,6 +26,7 @@ import {
   type RetryResult,
 } from "./retry";
 import { snapshot, STORAGE_AREAS, type Snapshot, type Storage } from "./summary";
+import { largest, serveFile, servable, type LargeFile } from "./files";
 import { findMessage, getViewMeta, issueSizes, rawMail, viewFile, type ViewMeta } from "./messages";
 import {
   URL_KINDS,
@@ -334,7 +335,7 @@ function storageSection(st: Storage | null, now: Date): Html {
   );
   const kinds = Object.entries(st.captures).filter(([, k]) => k.count);
   const kindLabel = (k: string) => (k in URL_KIND_LABELS ? URL_KIND_LABELS[k as UrlKind] : k);
-  return html`<h2>Storage <span class="muted">(the whole R2 bucket, counted
+  return html`<h2>Storage <span class="muted">(<a href="/storage">largest files</a>; the whole R2 bucket, counted
 <span title="${st.computedAt?.toISOString() ?? ""}">${agoTime(st.computedAt, now)}</span>; recounted hourly)</span></h2>
 <table><tr><th></th><th>Objects</th><th>Size</th><th>Share</th></tr>
 ${STORAGE_AREAS.filter(([a]) => st.areas[a].count).map(([a, label]) => {
@@ -349,6 +350,48 @@ ${STORAGE_AREAS.filter(([a]) => st.areas[a].count).map(([a, label]) => {
 <td>${total.bytes ? ((100 * x.bytes) / total.bytes).toFixed(1) : "0"}%</td></tr>`;
 })}
 <tr><th>Total</th><td>${total.count}</td><td>${formatBytes(total.bytes)}</td><td></td></tr></table>`;
+}
+
+const AREA_LABELS: Record<string, string> = Object.fromEntries(STORAGE_AREAS);
+
+function shortUrl(u: string): string {
+  const s = u.replace(/^https?:\/\//, "");
+  return s.length > 70 ? `${s.slice(0, 69)}…` : s;
+}
+
+function largeFileRow(f: LargeFile, i: number): Html {
+  const what =
+    f.area === "captures"
+      ? html`${URL_KIND_LABELS[f.kind as UrlKind] ?? f.kind ?? "Link capture"}`
+      : html`${AREA_LABELS[f.area] ?? f.area}`;
+  const name = f.key.split("/").pop() ?? f.key;
+  const from = f.url
+    ? html`<a href="${f.url}" target="_blank" rel="noopener noreferrer" title="${f.url}">${shortUrl(f.url)}</a>`
+    : f.sha
+      ? html`message <a href="${messagePath(f.sha)}"><code>${f.sha.slice(0, 12)}</code></a>`
+      : html`<span class="muted">—</span>`;
+  return html`<tr><td>${i + 1}</td><td>${formatBytes(f.size)}</td><td>${what}</td>
+<td>${servable(f.key) ? html`<a href="/files?key=${encodeURIComponent(f.key)}" title="${f.key}"><code>${name}</code></a>` : html`<code title="${f.key}">${name}</code>`}</td>
+<td>${from}</td><td>${f.modified?.toISOString().slice(0, 10) ?? ""}</td></tr>`;
+}
+
+async function storagePage(ctx: Ctx): Promise<Response> {
+  const now = new Date();
+  const [snap, big] = await Promise.all([snapshot(ctx.env, now), largest(ctx.env)]);
+  return show(
+    ctx,
+    "Storage",
+    html`${storageSection(snap.storage, now)}
+<h2>Largest ${big?.files.length ?? 0} files</h2>
+${
+  !big || big.files.length === 0
+    ? html`<p class="muted">Not listed yet: dea-capture lists them with its hourly storage count.</p>`
+    : html`<p class="muted">Listed <span title="${big.computedAt?.toISOString() ?? ""}">${agoTime(big.computedAt, now)}</span>.
+Video, audio, images and text open in the browser; anything else downloads. The source link opens the original page.</p>
+<table><tr><th>#</th><th>Size</th><th>What</th><th>File</th><th>Source</th><th>Stored</th></tr>
+${big.files.map(largeFileRow)}</table>`
+}`,
+  );
 }
 
 const URL_KIND_LABELS = { page: "Pages", direct: "Files", media: "Media", gallery: "Social posts" } as const;
@@ -861,6 +904,8 @@ async function route(ctx: Ctx): Promise<Response> {
     if (path === "/settings") return settingsPage(ctx);
     if (path === "/quarantine") return quarantinePage(ctx);
     if (path === "/captures") return capturesPage(ctx);
+    if (path === "/storage") return storagePage(ctx);
+    if (path === "/files") return (await serveFile(ctx.env, ctx.url.searchParams.get("key") ?? "", request)) ?? text(404, "not found");
     if (path === "/quarantine/raw") return quarantineRaw(ctx);
     if (msgMatch) {
       const [, sha, raw, file] = msgMatch;
