@@ -7,7 +7,28 @@ import pytest
 from botocore.stub import Stubber
 
 from dea_capture import health
-from dea_capture.store import LocalStore, S3Store, split_s3_uri
+from dea_capture.store import LocalStore, S3Store, ext_for, split_s3_uri
+
+
+@pytest.mark.parametrize(
+    ("ctype", "url", "ext"),
+    [
+        ("font/woff2; charset=binary", "https://cdn.example.net/f", ".woff2"),
+        ("application/font-woff", "https://cdn.example.net/f", ".woff"),
+        ("application/x-font-ttf", "https://cdn.example.net/f", ".ttf"),
+        ("application/vnd.ms-fontobject", "https://cdn.example.net/f", ".eot"),
+        # a generic type defers to the URL, if that names one
+        ("application/octet-stream", "https://cdn.example.net/f.woff2?v=3", ".woff2"),
+        ("application/octet-stream", "https://cdn.example.net/f", ".bin"),
+        # a specific type wins over the URL
+        ("image/png", "https://cdn.example.net/f.jpg", ".png"),
+        ("image/jpeg", "https://cdn.example.net/f", ".jpg"),
+        (None, "https://cdn.example.net/f.woff#x", ".woff"),
+        (None, "https://cdn.example.net/f", ""),
+    ],
+)
+def test_ext_for(ctype: str | None, url: str, ext: str) -> None:
+    assert ext_for(ctype, url) == ext
 
 
 def test_local_store_claims_once(tmp_path: Path) -> None:

@@ -221,12 +221,31 @@ class S3Store:
         return found
 
 
+# types servers still send that the mimetypes table doesn't know
+_LEGACY_TYPES = {
+    "application/font-woff": ".woff",
+    "application/x-font-woff": ".woff",
+    "application/font-woff2": ".woff2",
+    "application/x-font-ttf": ".ttf",
+    "application/x-font-truetype": ".ttf",
+    "application/x-font-otf": ".otf",
+    "application/x-font-opentype": ".otf",
+}
+# types that say nothing about the body: the URL's extension is better
+_GENERIC_TYPES = frozenset(
+    {"application/octet-stream", "binary/octet-stream", "application/unknown"}
+)
+
+
 def ext_for(content_type: str | None, url: str) -> str:
     """A file extension for a body, from its type, else from its URL."""
     base = (content_type or "").split(";")[0].strip().lower()
-    ext = mimetypes.guess_extension(base) if base else None
-    if ext is None:
-        ext = mimetypes.guess_extension(mimetypes.guess_type(url.split("?")[0])[0] or "") or ""
+    from_url = mimetypes.guess_extension(mimetypes.guess_type(urlsplit(url).path)[0] or "")
+    if base in _GENERIC_TYPES and from_url:
+        ext = from_url
+    else:
+        from_type = _LEGACY_TYPES.get(base) or (mimetypes.guess_extension(base) if base else None)
+        ext = from_type or from_url or ""
     return {".jpe": ".jpg", ".jpeg": ".jpg"}.get(ext, ext)
 
 
