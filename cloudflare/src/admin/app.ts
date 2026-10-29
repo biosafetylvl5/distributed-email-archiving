@@ -18,6 +18,13 @@ import {
 } from "../settings";
 import { authenticate, type AuthResult } from "./auth";
 import { CHART_DAYS } from "./stats";
+import {
+  parseRetryRequest,
+  requestRetry,
+  RETRYABLE,
+  waitingRetries,
+  type RetryResult,
+} from "./retry";
 import { snapshot, type Snapshot } from "./summary";
 import {
   URL_KINDS,
@@ -26,6 +33,8 @@ import {
   type CaptureState,
   type CaptureSummary,
   type UrlCaptures,
+  type UrlKind,
+  type UrlStatus,
 } from "./captures";
 import { html, page, securityHeaders, type Html } from "./html";
 import {
@@ -80,7 +89,7 @@ function redirect(path: string, flash?: { msg?: string; err?: string }): Respons
   const qs = q.toString();
   return new Response(null, {
     status: 303,
-    headers: securityHeaders({ location: qs ? `${path}?${qs}` : path }),
+    headers: securityHeaders({ location: qs ? `${path}${path.includes("?") ? "&" : "?"}${qs}` : path }),
   });
 }
 
@@ -314,13 +323,24 @@ ${t.links_resolved} redirects followed, ${t.links_unresolved} couldn't be, ${t.l
 
 const URL_KIND_LABELS = { page: "Pages", direct: "Files", media: "Media", gallery: "Social posts" } as const;
 
-function urlTable(u: UrlCaptures): Html {
+// `back`: the /captures state to return to, when cells get "Retry now" buttons
+function urlTable(u: UrlCaptures, back?: string): Html {
   if (u.total === 0) return html`<span class="muted">none queued yet</span>`;
   const cols = URL_STATUSES.filter((s) => URL_KINDS.some((k) => u.byKind[k][s] > 0));
+  const cell = (k: UrlKind, s: UrlStatus) => {
+    const n = u.byKind[k][s];
+    if (!n) return html`<span class="muted">0</span>`;
+    if (back === undefined || !(RETRYABLE as readonly string[]).includes(s)) return html`${n}`;
+    return html`${n} ${retryButton(
+      { scope: "urls", kind: k, status: s },
+      back,
+      `Capture these ${n} again now${s === "failed" ? ", one more attempt each" : ""}`,
+    )}`;
+  };
   return html`${u.total} distinct URLs, each captured once however many messages link to it${u.wayback ? html`; ${u.wayback} have a Wayback Machine snapshot, stored when our own capture failed` : ""}
 <table><tr><th></th>${cols.map((s) => html`<th>${s}</th>`)}</tr>
 ${URL_KINDS.map(
-    (k) => html`<tr><th>${URL_KIND_LABELS[k]}</th>${cols.map((s) => html`<td>${u.byKind[k][s] || html`<span class="muted">0</span>`}</td>`)}</tr>`,
+    (k) => html`<tr><th>${URL_KIND_LABELS[k]}</th>${cols.map((s) => html`<td>${cell(k, s)}</td>`)}</tr>`,
   )}</table>
 <span class="muted">Each kind is captured one at a time: pages in a browser, media with yt-dlp, social posts with gallery-dl.</span>`;
 }
@@ -328,13 +348,51 @@ ${URL_KINDS.map(
 const CAPTURE_STATES = ["all", "partial", "pending", "done"] as const;
 const CAPTURE_PAGE_MAX = 200;
 
-function captureRow(m: ArchivedMessage): Html {
+function retryButton(fields: Record<string, string>, back: string, title: string): Html {
+  return html`<form class="inline" method="post" action="/captures/retry">${Object.entries(fields).map(
+    ([k, v]) => html`<input type="hidden" name="${k}" value="${v}">`,
+  )}<input type="hidden" name="back" value="${back}"><button title="${title}">Retry now</button></form>`;
+}
+
+function retryWhat(r: RetryResult): Html {
+  if (r.scope === "message") return html`message <code title="${r.sha ?? ""}">${r.sha?.slice(0, 12) ?? "?"}</code>`;
+  const label = URL_KIND_LABELS[r.kind as UrlKind] ?? r.kind ?? "?";
+  return html`${label}, ${r.status ?? "?"}`;
+}
+
+function retryOutcome(r: RetryResult): string {
+  const parts: string[] = [];
+  const rl = r.relinked;
+  if (rl?.tried) parts.push(`${rl.resolved} of ${rl.tried} redirects followed`);
+  if (rl?.rateLimited) parts.push("stopped at a 429");
+  if (rl?.outOfTime) parts.push("out of time, continues next run");
+  if (r.rescheduled !== undefined) parts.push(`${r.rescheduled} of ${r.rescheduled + (r.left ?? 0)} URLs due now`);
+  if (r.error) parts.push(r.error);
+  return parts.join("; ") || "nothing to do";
+}
+
+function retriesSection(waiting: number, recent: RetryResult[]): Html {
+  return html`<p>${waiting ? html`<strong>${waiting} retry request${waiting === 1 ? "" : "s"} waiting.</strong>` : "No retry requests waiting."}
+<span class="muted">dea-capture applies them every 5 minutes. Only URLs that failed or wait for a retry are made due,
+and not those due within the hour, which may be running; a failed one gets one more attempt.</span></p>
+${
+  recent.length
+    ? html`<table><tr><th>Applied (UTC)</th><th>Retried</th><th>Result</th></tr>
+${recent.map(
+  (r) => html`<tr><td>${r.appliedAt?.toISOString().slice(0, 16).replace("T", " ") ?? ""}</td><td>${retryWhat(r)}</td>
+<td>${retryOutcome(r)}</td></tr>`,
+)}</table>`
+    : ""
+}`;
+}
+
+function captureRow(m: ArchivedMessage, back: string): Html {
   const c = m.capture;
   const sub = m.user ? html`<a href="${userPath(m.user)}">${m.user}</a> <code>${m.tag || "(bare)"}</code>` : html`<span class="muted">unknown</span>`;
   const sha = m.key.split("/").pop()?.replace(/\.eml$/, "") ?? "";
   if (!c) {
     return html`<tr><td>${m.day}</td><td>${sub}</td><td><code class="muted" title="${sha}">${sha.slice(0, 12)}</code></td>
-<td class="muted">pending</td><td></td><td></td><td></td></tr>`;
+<td class="muted">pending</td><td></td><td></td><td></td><td></td></tr>`;
   }
   const n = c.counts;
   const problems = [
@@ -347,12 +405,13 @@ function captureRow(m: ArchivedMessage): Html {
 <td>${n.assets_ok}${problems.length ? html` <span class="status-pending">(${problems.join(", ")})</span>` : ""}</td>
 <td>${n.links_capture + n.links_resolve} <span class="muted">/ ${n.links}</span>
 ${c.linksState === "pending" ? html`<span class="muted">· not queued yet</span>` : html`<span class="muted">· ${n.captures_queued} URLs queued</span>${n.links_unresolved ? html` <span class="status-pending">(${n.links_unresolved} unresolved)</span>` : ""}`}</td>
-<td title="${c.completedAt?.toISOString() ?? ""}">${c.completedAt?.toISOString().slice(0, 16).replace("T", " ") ?? ""}</td></tr>`;
+<td title="${c.completedAt?.toISOString() ?? ""}">${c.completedAt?.toISOString().slice(0, 16).replace("T", " ") ?? ""}</td>
+<td>${retryButton({ scope: "message", sha }, back, "Follow this message's failed redirects again, then capture its failed links again now")}</td></tr>`;
 }
 
 async function capturesPage(ctx: Ctx): Promise<Response> {
   const now = new Date();
-  const snap = await snapshot(ctx.env, now);
+  const [snap, waiting] = await Promise.all([snapshot(ctx.env, now), waitingRetries(ctx.env)]);
   const c = snap.captures;
   const asked = ctx.url.searchParams.get("state") ?? "all";
   const state = (CAPTURE_STATES as readonly string[]).includes(asked) ? asked : "all";
@@ -365,6 +424,10 @@ async function capturesPage(ctx: Ctx): Promise<Response> {
 the link inventory. Counts only; the files themselves are in R2 under <code>issues/&lt;sha&gt;/</code>.</p>
 ${freshness(snap, now)}
 ${c.partial ? html`<p class="msg warn">Only part of the archive was scanned.</p>` : ""}
+<h2>Linked URLs</h2>
+${urlTable(c.urls, state)}
+${retriesSection(waiting, snap.retries.recent)}
+<h2>Messages</h2>
 <p>${CAPTURE_STATES.map(
       (st, i) =>
         html`${i ? " · " : ""}${st === state ? html`<strong>${st} (${total(st)})</strong>` : html`<a href="/captures?state=${st}">${st} (${total(st)})</a>`}`,
@@ -373,8 +436,8 @@ ${
   shown.length === 0
     ? html`<p class="muted">No messages.</p>`
     : html`<table><tr><th>Received</th><th>Subscription</th><th>Message</th><th>Status</th><th>Embedded files</th>
-<th title="links to capture or resolve, of all links">Links</th><th>Processed (UTC)</th></tr>
-${shown.slice(0, CAPTURE_PAGE_MAX).map(captureRow)}</table>
+<th title="links to capture or resolve, of all links">Links</th><th>Processed (UTC)</th><th></th></tr>
+${shown.slice(0, CAPTURE_PAGE_MAX).map((m) => captureRow(m, state))}</table>
 ${shown.length > CAPTURE_PAGE_MAX ? html`<p class="muted">Showing the newest ${CAPTURE_PAGE_MAX} of ${shown.length}.</p>` : ""}`
 }`,
   );
@@ -638,6 +701,19 @@ async function promoteMessage(ctx: Ctx): Promise<Response> {
   return redirect("/quarantine", { msg: `Promoted to ${dest}` });
 }
 
+async function retryCaptures(ctx: Ctx): Promise<Response> {
+  const form = await ctx.request.formData();
+  const fields = Object.fromEntries(["scope", "sha", "kind", "status", "back"].map((k) => [k, field(form, k)]));
+  const back = (CAPTURE_STATES as readonly string[]).includes(fields.back) ? `/captures?state=${fields.back}` : "/captures";
+  const req = parseRetryRequest(fields);
+  if (typeof req === "string") return redirect(back, { err: req });
+  await requestRetry(ctx.env, req);
+  console.log(JSON.stringify({ evt: "retry_requested", ...req, by: ctx.email }));
+  const what =
+    req.scope === "message" ? `message ${req.sha.slice(0, 12)}` : `${req.status} ${URL_KIND_LABELS[req.kind].toLowerCase()}`;
+  return redirect(back, { msg: `Retry queued for ${what}; dea-capture picks it up within about 5 minutes` });
+}
+
 // --- routing
 
 // CSRF guard for POSTs. Sec-Fetch-Site is set by the browser and can't be
@@ -676,6 +752,7 @@ async function route(ctx: Ctx): Promise<Response> {
     if (path === "/users") return addUser(ctx);
     if (path === "/settings") return saveSettings(ctx);
     if (path === "/quarantine/promote") return promoteMessage(ctx);
+    if (path === "/captures/retry") return retryCaptures(ctx);
     if (userMatch && userMatch[2]) {
       const user = userMatch[1];
       if (!isValidUser(user)) return text(404, "not found");

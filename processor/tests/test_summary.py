@@ -186,3 +186,14 @@ def test_ticker_ticks_and_reports_a_dead_thread() -> None:
     t._main_thread.join(2)
     t.health = True
     assert not t.is_healthy()
+
+
+def test_carries_the_retry_requests_and_results(tmp_path: Path) -> None:
+    store = LocalStore(tmp_path)
+    store.put(
+        summary.RETRY_REQUESTS + "20261029T100000Z-0123456789abcdef.json", b"{}", "application/json"
+    )
+    store.put(summary.RETRY_RESULTS, b'[{"scope": "urls", "rescheduled": 2}]', "application/json")
+    summary.build(store, now=lambda: NOW, workers=2)
+    doc = json.loads(store.get(summary.SUMMARY_KEY) or b"")
+    assert doc["retries"] == {"waiting": 1, "recent": [{"scope": "urls", "rescheduled": 2}]}

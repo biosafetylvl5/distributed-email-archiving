@@ -12,6 +12,7 @@ import {
   type CaptureSummary,
   type UrlCaptures,
 } from "./captures";
+import { liveRetries, parseRetries, type Retries } from "./retry";
 import { archiveStats, summarize, type ArchiveStats, type StoredObject } from "./stats";
 
 export const SUMMARY_KEY = "dashboard/summary.json";
@@ -21,6 +22,7 @@ export interface Snapshot {
   generatedAt: Date | null; // null: listed live just now
   stats: ArchiveStats;
   captures: CaptureSummary;
+  retries: Retries;
 }
 
 interface Stored {
@@ -35,6 +37,7 @@ interface SummaryFile {
   generated_at: string;
   incoming: Stored[];
   statuses: Stored[];
+  retries?: unknown;
   urls: { byKind: Record<string, Record<string, number>>; wayback: number; lastUpdated: string | null };
 }
 
@@ -72,13 +75,13 @@ export function fromSummary(raw: string, now: Date): Snapshot | null {
   const incoming = objects(f.incoming);
   const captures = summarizeCaptures(incoming, objects(f.statuses));
   captures.urls = parseUrls(f.urls ?? { byKind: {}, wayback: 0, lastUpdated: null });
-  return { generatedAt: date(f.generated_at), stats: summarize(incoming, now), captures };
+  return { generatedAt: date(f.generated_at), stats: summarize(incoming, now), captures, retries: parseRetries(f.retries) };
 }
 
 export async function snapshot(env: Env, now = new Date()): Promise<Snapshot> {
   const obj = await env.ARCHIVE.get(SUMMARY_KEY);
   const got = obj ? fromSummary(await obj.text(), now) : null;
   if (got) return got;
-  const [stats, captures] = await Promise.all([archiveStats(env, now), captureSummary(env)]);
-  return { generatedAt: null, stats, captures };
+  const [stats, captures, retries] = await Promise.all([archiveStats(env, now), captureSummary(env), liveRetries(env)]);
+  return { generatedAt: null, stats, captures, retries };
 }

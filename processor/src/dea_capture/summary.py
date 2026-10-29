@@ -8,6 +8,8 @@ listing the bucket, which costs more CPU than a Worker on the free plan has.
 - ``statuses``: each ``issue-status/`` record's key and the metadata the
   dashboard reads (``STATUS_META``: states, the message's key and counts, no
   URLs); a count of 0 is left out, which the dashboard reads as 0;
+- ``retries``: how many of the dashboard's retry requests are waiting, and
+  what the latest did (``dashboard/retries.json``);
 - ``urls``: how many ``captures/index/`` records there are of each kind and
   status, how many have a Wayback snapshot, and the latest update.
 
@@ -30,6 +32,9 @@ from .store import Listed, Store
 
 SUMMARY_KEY = "dashboard/summary.json"
 STATE_KEY = "dashboard/summary-state.json"
+# the dashboard's retry requests and what they did (see retry.py)
+RETRY_REQUESTS = "captures/retry/"
+RETRY_RESULTS = "dashboard/retries.json"
 VERSION = 1
 
 _INCOMING = re.compile(r"^incoming/(archive|quarantine)/\d{4}-\d{2}-\d{2}/")
@@ -68,6 +73,16 @@ def _status_meta(meta: dict[str, str]) -> dict[str, str]:
 
 def _put_compact(store: Store, key: str, obj: object) -> None:
     store.put(key, json.dumps(obj, separators=(",", ":")).encode(), "application/json")
+
+
+def _retries(store: Listable) -> dict[str, Any]:
+    """How many retry requests are waiting, and what the latest ones did."""
+    try:
+        done = json.loads(store.get(RETRY_RESULTS) or b"[]")
+    except ValueError:
+        done = []
+    waiting = [o for o in store.listing(RETRY_REQUESTS) if o.key.endswith(".json")]
+    return {"waiting": len(waiting), "recent": done if isinstance(done, list) else []}
 
 
 def _metadata_for(
@@ -155,6 +170,7 @@ def build(
         "generated_at": _iso(now()),
         "incoming": incoming_out,
         "statuses": statuses_out,
+        "retries": _retries(store),
         "urls": {
             "total": total,
             "byKind": by_kind,

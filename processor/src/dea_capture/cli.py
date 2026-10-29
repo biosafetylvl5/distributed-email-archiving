@@ -3,8 +3,10 @@
 ``inventory`` is the offline dry run. ``issue`` is the first capture stage:
 it stores one message's embeds and link inventory, then resolves its links and
 queues them. ``capture`` runs one queued capture. ``page`` captures one page
-into a local directory, for trying the crawler out. ``healthcheck`` is the
-pod's liveness probe.
+into a local directory, for trying the crawler out. ``summary`` applies the
+dashboard's retry requests and rebuilds its summary. ``relink`` follows again
+the redirects that couldn't be followed. ``healthcheck`` is the pod's
+liveness probe.
 """
 
 from __future__ import annotations
@@ -19,11 +21,12 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import __version__, capture, gallery, health, media, page, summary
-from .fetch import HttpFetcher
+from . import __version__, capture, gallery, health, media, page, retry, summary
+from .fetch import HostPacer, HttpFetcher
 from .guard import GuardedFetcher, IPNetwork
 from .inventory import Inventory, inventory
-from .issue import process_issue
+from .issue import process_issue, relink_issue
+from .links import Relinked
 from .proxy import GuardProxy
 from .store import LocalStore, S3Store, Store, split_s3_uri
 
@@ -175,12 +178,72 @@ def _cmd_page(args: argparse.Namespace) -> int:
     return 0 if got.outcome == "ok" else 1
 
 
-def _cmd_summary(args: argparse.Namespace) -> int:
-    bucket = args.bucket.removeprefix("s3://").strip("/")
+def _bucket(uri: str) -> str:
+    bucket = uri.removeprefix("s3://").strip("/")
     if not bucket or "/" in bucket:
-        raise SystemExit(f"not an s3://bucket URI: {args.bucket}")
-    print(json.dumps(summary.build(S3Store(bucket))))
+        raise SystemExit(f"not an s3://bucket URI: {uri}")
+    return bucket
+
+
+def _relinker(store: Store, pacer: HostPacer) -> retry.Relinker:
+    """Follows a message's failed redirects again, as the issue stage does."""
+    blocked = _extra_blocked()
+    heads = HttpFetcher(user_agent=_user_agent(), max_bytes=0, truncate=True)
+
+    def make_resolver(inv: Inventory) -> GuardedFetcher:
+        return GuardedFetcher(heads, extra_blocked=blocked, refused_urls=inv.refused_urls())
+
+    def relink(raw: bytes, deadline: float) -> Relinked:
+        return relink_issue(raw, store, make_resolver, now=datetime.now(UTC), pacer=pacer,
+                            deadline=deadline)  # fmt: skip
+
+    return relink
+
+
+def _cmd_summary(args: argparse.Namespace) -> int:
+    store = S3Store(_bucket(args.bucket))
+    if not args.no_retries:
+        keys = [o.key for o in store.listing(summary.RETRY_REQUESTS)]
+        if keys:
+            relink = _relinker(store, HostPacer(retry.RELINK_INTERVAL))
+            done = retry.apply_requests(store, keys, datetime.now(UTC), relink)
+            print("RETRY " + json.dumps([{k: v for k, v in r.items() if k != "sha"} for r in done]))
+    print(json.dumps(summary.build(store)))
     return 0
+
+
+def _cmd_relink(args: argparse.Namespace) -> int:
+    """Follow again the redirects that couldn't be followed, message by message."""
+    store = S3Store(_bucket(args.bucket))
+    pacer = HostPacer(args.interval)
+    relink = _relinker(store, pacer)
+    # the summary's cache of each status record's metadata saves a HEAD each
+    try:
+        cached = json.loads(store.get(summary.STATE_KEY) or b"{}").get("statuses") or {}
+    except ValueError:
+        cached = {}
+    sources = []
+    for o in store.listing("issue-status/"):
+        meta = cached[o.key][1] if o.key in cached else store.metadata(o.key) or {}
+        if meta.get("links_unresolved", "0") not in ("", "0"):
+            sources.append(meta.get("source", ""))
+    totals: Counter[str] = Counter(messages=len(sources))
+    deadline = float("inf")
+    for i, source in enumerate(sources[: args.limit]):
+        raw = store.get(source.removeprefix(f"s3://{store.bucket}/"))
+        if raw is None:
+            totals["missing"] += 1
+            continue
+        got = relink(raw, deadline)
+        totals["tried"] += got.tried
+        totals["resolved"] += got.resolved
+        totals["done"] = i + 1
+        print("RELINK " + json.dumps(dict(totals)), flush=True)
+        if got.rate_limited:
+            totals["rate_limited"] = 1
+            break
+    print("RELINK " + json.dumps(dict(totals)))
+    return 1 if totals["rate_limited"] else 0
 
 
 def _cmd_healthcheck(args: argparse.Namespace) -> int:
@@ -295,7 +358,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     p.add_argument("bucket", metavar="s3://BUCKET")
+    p.add_argument("--no-retries", action="store_true",
+                   help="don't apply the dashboard's retry requests first")  # fmt: skip
     p.set_defaults(func=_cmd_summary)
+
+    p = sub.add_parser(
+        "relink",
+        help="follow again the tracking redirects that couldn't be followed",
+        description=(
+            "For each message in s3://BUCKET with links whose redirect couldn't be followed "
+            "(a tracker that answered 429, say), follow them again and queue where they land. "
+            "Stops at the first 429. Prints counts only."
+        ),
+    )
+    p.add_argument("bucket", metavar="s3://BUCKET")
+    p.add_argument("--interval", type=float, default=retry.RELINK_INTERVAL,
+                   help="seconds between requests to one host (default %(default)s)")  # fmt: skip
+    p.add_argument("--limit", type=int, default=None, help="at most this many messages")
+    p.set_defaults(func=_cmd_relink)
 
     p = sub.add_parser("healthcheck", help="liveness probe for the courier service")
     p.add_argument("--metrics", default="http://127.0.0.1:8000/metrics")

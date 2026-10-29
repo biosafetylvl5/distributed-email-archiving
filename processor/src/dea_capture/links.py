@@ -15,13 +15,14 @@ them, and its counts are added to ``issue-status/<sha>.json``.
 from __future__ import annotations
 
 import json
+import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from .capture import Kind, guess_kind, queue, url_hash
-from .classify import Decision, tracking_vendor
+from .classify import Classified, Decision, tracking_vendor
 from .fetch import HostPacer
 from .guard import GuardedFetcher
 from .inventory import Inventory
@@ -93,35 +94,98 @@ def process_links(
         if link.href in seen:
             continue
         seen.add(link.href)
-        rec = LinkRecord(link.href, str(link.decision), "ok")
-        if link.decision == Decision.CAPTURE:
-            rec.canonical = link.canonical
-            content_type = None
-        else:
-            r = resolve(link.fetch_url or link.href, resolver, pacer)
-            rec.outcome, rec.chain, rec.error = r.outcome, r.chain[1:], r.error
-            rec.canonical, rec.http_status = r.canonical, r.http_status
-            rec.stopped_at_auth = r.stopped_at_auth
-            content_type = r.content_type
-        if rec.canonical and tracking_vendor(rec.canonical):
-            # a tracker's URL holds the reader's token: never shared, never requested again
-            rec.outcome, rec.canonical = "failed", None
-            rec.error = rec.error or "resolved to a tracker URL"
-        if rec.canonical:
-            rec.h = url_hash(rec.canonical)
-            rec.kind = guess_kind(rec.canonical, content_type)
-            if rec.h not in queued:
-                queued[rec.h] = queue(store, rec.canonical, rec.kind, now)
-            rec.queued = queued[rec.h]
-        records.append(rec)
+        records.append(_link_record(link, store, resolver, pacer, now, queued))
     doc = {
         "sha256": sha,
         "links_version": LINKS_VERSION,
-        "completed_at": now.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "completed_at": _stamp(now),
         "links": [asdict(r) for r in records],
     }
     put_json(store, captures_key(sha), doc)
     return doc
+
+
+def _stamp(now: datetime) -> str:
+    return now.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _link_record(
+    link: Classified, store: Store, resolver: GuardedFetcher, pacer: HostPacer, now: datetime,
+    queued: dict[str, str],
+) -> LinkRecord:  # fmt: skip
+    """Resolve (if need be) and queue one link. ``queued``: what queueing
+    found per URL hash in this issue so far, so each is queued once."""
+    rec = LinkRecord(link.href, str(link.decision), "ok")
+    if link.decision == Decision.CAPTURE:
+        rec.canonical = link.canonical
+        content_type = None
+    else:
+        r = resolve(link.fetch_url or link.href, resolver, pacer)
+        rec.outcome, rec.chain, rec.error = r.outcome, r.chain[1:], r.error
+        rec.canonical, rec.http_status = r.canonical, r.http_status
+        rec.stopped_at_auth = r.stopped_at_auth
+        content_type = r.content_type
+    if rec.canonical and tracking_vendor(rec.canonical):
+        # a tracker's URL holds the reader's token: never shared, never requested again
+        rec.outcome, rec.canonical = "failed", None
+        rec.error = rec.error or "resolved to a tracker URL"
+    if rec.canonical:
+        rec.h = url_hash(rec.canonical)
+        rec.kind = guess_kind(rec.canonical, content_type)
+        if rec.h not in queued:
+            queued[rec.h] = queue(store, rec.canonical, rec.kind, now)
+        rec.queued = queued[rec.h]
+    return rec
+
+
+@dataclass
+class Relinked:
+    tried: int = 0
+    resolved: int = 0
+    rate_limited: bool = False  # stopped at a 429
+    out_of_time: bool = False
+
+
+def retry_unresolved(
+    sha: str, inv: Inventory, store: Store, resolver: GuardedFetcher, *, now: datetime,
+    pacer: HostPacer, deadline: float | None = None,
+) -> tuple[dict[str, Any] | None, Relinked]:  # fmt: skip
+    """Follow again the redirects of an issue's links that couldn't be
+    followed, and queue where they land; returns the updated ``captures.json``
+    doc (None if the issue has none, or nothing changed) and what happened.
+
+    Stops at the first 429, since the rest would get one too, and before
+    ``deadline`` (a ``time.monotonic()`` value). ``pacer`` sets the pace:
+    a tracker's links are all on one host.
+    """
+    got = Relinked()
+    doc = load_links(store, sha)
+    if doc is None:
+        return None, got
+    by_href = {link.href: link for link in inv.to_fetch()}
+    queued = {str(r["h"]): str(r.get("queued")) for r in doc["links"] if r.get("h")}
+    changed = False
+    for i, old in enumerate(doc["links"]):
+        if old.get("outcome") != "failed" or old.get("decision") != str(Decision.RESOLVE):
+            continue
+        link = by_href.get(old.get("href", ""))
+        if link is None:
+            continue
+        if deadline is not None and time.monotonic() >= deadline:
+            got.out_of_time = True
+            break
+        got.tried += 1
+        rec = _link_record(link, store, resolver, pacer, now, queued)
+        if rec.http_status == 429 and rec.outcome == "failed":
+            got.rate_limited = True
+            break
+        doc["links"][i], changed = asdict(rec), True
+        got.resolved += rec.outcome == "ok"
+    if not changed:
+        return None, got
+    doc["relinked_at"] = _stamp(now)
+    put_json(store, captures_key(sha), doc)
+    return doc, got
 
 
 def load_links(store: Store, sha: str) -> dict[str, Any] | None:

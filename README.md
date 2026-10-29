@@ -101,7 +101,10 @@ The ingest Worker also serves a small dashboard (`src/admin/`) for:
   (stored in the `SETTINGS` KV namespace; blank falls back to `wrangler.toml`)
 - **Quarantine:** the 50 most recent quarantined messages, with download and promote-to-archive
 - **Captures:** per message, what `dea-capture` stored (embedded files by status, links by
-  decision, how many URLs it queued), filterable to partial or pending messages
+  decision, how many URLs it queued), filterable to partial or pending messages; "Retry now"
+  for every failed or retrying URL of a kind, or for one message's links (its failed redirects
+  are followed again first). The Worker leaves a request under `captures/retry/` that the
+  processor applies within 5 minutes; the page shows what the latest requests did
 - **Overview:** totals, capture progress (including every linked URL by kind and status) and
   today's usage against the daily caps
 

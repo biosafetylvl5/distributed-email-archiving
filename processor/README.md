@@ -106,6 +106,13 @@ redirect couldn't be followed) with counts of what was resolved and queued.
 A message whose embeds are already done still gets its links resolved, once.
 `--no-links` skips this half.
 
+A redirect that couldn't be followed (a tracker that answered 429, say) is
+not retried on its own. `dea-capture relink s3://<bucket>` follows those
+again, message by message, at most one request per host every 10 s
+(`--interval`), and stops at the first 429. Following a tracking link again
+counts as another click on it, so run it deliberately. It rewrites
+`captures.json` and the status record, and queues where the links land.
+
 Stored stylesheets are read too. The fonts and images they refer to are
 fetched as `css` embeds, resolved against the stylesheet's own URL, and their
 `@import`s as `css-import`, up to three stylesheets deep. Each record notes
@@ -226,6 +233,17 @@ since the last run get a HEAD request; what it has seen is kept in
 and of each `issue-status/` record only the fields the dashboard reads, less
 counts of 0. Both files are compact JSON, as the Worker parses the summary on
 every page view.
+
+Before that, it applies the dashboard's retry requests. The Worker never
+edits a capture record, as a running capture would overwrite the edit. It
+writes `captures/retry/<stamp>-<id>.json` instead: either every URL of one
+kind and status (`retrying` or `failed`), or one message, whose failed
+redirects are followed again (as `relink` does) before its URLs are retried.
+A retried URL is due at once; a `failed` one goes back to `retrying` for one
+more attempt. One due within its kind's lease time is left alone, since it
+may be running. Requests get 5 minutes per run, and one cut short waits for
+the next. What each did (counts only) goes to `dashboard/retries.json` and
+the summary. `--no-retries` skips this.
 
 ## Usage
 

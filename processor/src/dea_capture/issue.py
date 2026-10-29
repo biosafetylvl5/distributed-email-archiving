@@ -52,7 +52,7 @@ from .extract import Embed, css_urls, parse
 from .fetch import FetchError, HostPacer, TooLarge, follow
 from .guard import ForbiddenFetch, GuardedFetcher
 from .inventory import Inventory, inventory
-from .links import captures_key, link_counts, load_links, process_links
+from .links import Relinked, captures_key, link_counts, load_links, process_links, retry_unresolved
 from .store import Store, ext_for, put_json
 
 Status = Literal["ok", "failed", "refused", "deferred:size", "deferred:budget"]
@@ -312,6 +312,26 @@ def process_issue(
         counts.update(_link_line(captures))
     write_status(store, sha, manifest, links_doc, captures)
     return IssueResult(sha, skipped=False, counts=counts)
+
+
+def relink_issue(
+    raw: bytes, store: Store, make_resolver: Callable[[Inventory], GuardedFetcher], *,
+    now: datetime, pacer: HostPacer, deadline: float | None = None,
+) -> Relinked:  # fmt: skip
+    """Follow again the redirects of this message's links that couldn't be
+    followed (see ``links.retry_unresolved``), and update its status."""
+    sha = hashlib.sha256(raw).hexdigest()
+    manifest = store.get(manifest_key(sha))
+    if manifest is None:
+        return Relinked()
+    inv = inventory(raw)
+    doc, got = retry_unresolved(sha, inv, store, make_resolver(inv), now=now, pacer=pacer,
+                                deadline=deadline)  # fmt: skip
+    if doc is not None:
+        links_data = store.get(links_key(sha))
+        write_status(store, sha, json.loads(manifest),
+                     json.loads(links_data) if links_data else None, doc)  # fmt: skip
+    return got
 
 
 def _link_line(doc: dict[str, Any]) -> dict[str, int]:
