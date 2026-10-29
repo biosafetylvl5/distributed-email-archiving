@@ -16,7 +16,6 @@ Both need the ``service`` extra; courier finds them through the
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Generator
 from datetime import UTC, datetime
 from typing import Any, ClassVar
@@ -62,14 +61,10 @@ class Ticker(DataMonitorBasePlugin):  # type: ignore[misc,unused-ignore]
             raise ValueError("interval_seconds must be positive")
         self.hostname = str(cfg.get("hostname", "ticker"))
         self.health = False
-        self._stop_event = threading.Event()
-
-    def stop(self) -> None:
-        self._stop_event.set()
-        super().stop()
 
     def is_healthy(self) -> bool:
-        return self.health
+        # and its thread is alive: one that died is restarted by courier
+        return bool(self.health and self._worker_alive())
 
     def find_file(self) -> Generator[Datum[Any], None, None]:
         self.health = True

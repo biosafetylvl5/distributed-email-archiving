@@ -134,3 +134,40 @@ def test_s3_listing_and_metadata() -> None:
     ]
     assert store.metadata("a") == {"user": "ann"}
     assert store.metadata("b") is None
+
+
+def test_ticker_ticks_and_reports_a_dead_thread() -> None:
+    pytest.importorskip("courier")
+    import time
+    from types import SimpleNamespace
+
+    from courier.config import ServiceConfig
+
+    from dea_capture.courier_plugin import Ticker
+
+    t = Ticker(SimpleNamespace(config=ServiceConfig()), {"interval_seconds": 0.05})
+    sent: list[str] = []
+    t.add_metadata_to_file = lambda file: file  # type: ignore[method-assign]
+    t.emit = lambda d, *a, **k: sent.append(d.file)  # type: ignore[method-assign]
+
+    def wait_for(n: int) -> None:
+        deadline = time.monotonic() + 5
+        while len(sent) < n and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(sent) >= n
+
+    t.start()
+    wait_for(2)
+    assert t.is_healthy() and sent[0].startswith("tick-")
+    t.stop()
+    assert not t.is_healthy()
+    # courier restarts a plugin on the same object
+    t.start()
+    wait_for(len(sent) + 1)
+    assert t.is_healthy()
+    # a thread that has died is unhealthy, whatever its flag says
+    assert t._main_thread is not None
+    t._stop_event.set()
+    t._main_thread.join(2)
+    t.health = True
+    assert not t.is_healthy()
