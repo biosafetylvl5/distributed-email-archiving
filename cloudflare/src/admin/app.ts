@@ -710,7 +710,7 @@ const HEADER_LABELS = [
 ] as const;
 const REMOVED_LABELS: Record<string, string> = {
   pixels: "tracking pixels",
-  unstored: "embeds not stored",
+  unstored: "embedded files that weren't stored",
   links_removed: "links removed (trackers, unsubscribe and other per-reader links)",
   links_kept: "links kept, pointing where they lead",
 };

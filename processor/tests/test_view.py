@@ -49,6 +49,9 @@ HOSTILE = """<html><head>
 <a href="https://list.example.com/unsubscribe?u=SECRET">unsubscribe</a>
 <a href="mailto:reader@example.org">mail</a>
 <a href="#top">top</a>
+<!--[if mso]><v:rect><v:fill src="https://evil.example.com/bg.png"/></v:rect>
+<a href="https://evil.example.com/c?u=SECRET">x</a><![endif]-->
+<!--[if !mso]><!--><p>for everyone else</p><!--<![endif]-->
 </body></html>"""
 
 
@@ -141,6 +144,7 @@ def test_render_loads_nothing_from_elsewhere(tmp_path: Path) -> None:
     ]
     for g in gone:
         assert g not in out, g
+    assert "<!--" not in out and "<p>for everyone else</p>" in out
     # every src, srcset, href and url() left is ours, an anchor, or a resolved link
     refs = re.findall(r'(?:src|srcset|href)="([^"]*)"', out) + re.findall(r'url\("([^"]*)"\)', out)
     for ref in refs:

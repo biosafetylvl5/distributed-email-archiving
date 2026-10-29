@@ -30,14 +30,14 @@ from datetime import UTC, datetime
 from email.message import EmailMessage
 from typing import Any
 
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, Comment, Tag
 
 from .classify import Classified, Decision, LinkClass, tracking_vendor
 from .extract import parse, parse_srcset, rewrite_css
 from .inventory import inventory
 from .store import Store, put_json
 
-VIEW_VERSION = 1
+VIEW_VERSION = 2
 _STYLESHEETS = ("stylesheet", "css-import")
 # removed with their content
 _DROP = ["script", "iframe", "frame", "frameset", "object", "embed", "applet", "base", "meta",
@@ -121,7 +121,7 @@ class _Rewriter:
         a = self.stored.get((url or "").strip())
         if a is None:
             if url:
-                self.removed["pixels" if url.strip() in self.pixels else "embeds"] += 1
+                self.removed["pixels" if url.strip() in self.pixels else "unstored"] += 1
             return None
         if a.get("via") in _STYLESHEETS:
             return _name(a["key"]) if from_css else f"css/{_name(a['key'])}"
@@ -210,6 +210,10 @@ def _rewrite_links(soup: BeautifulSoup, links: dict[str, Classified],
 
 
 def _strip(soup: BeautifulSoup) -> None:
+    # comments, Outlook's conditional ones included: inert in a browser, but
+    # they carry the original embeds and tracked links
+    for c in soup.find_all(string=lambda s: isinstance(s, Comment)):
+        c.extract()
     for el in soup.find_all(_DROP):
         assert isinstance(el, Tag)
         el.decompose()
