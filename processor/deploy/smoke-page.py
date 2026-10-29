@@ -104,8 +104,8 @@ assert g.info is None and proxy.stats.refused.get("127.0.0.1"), "the proxy didn'
 kept: dict[str, int] = {}
 
 
-def grabber(url: str, workdir: Path) -> media.Grab:
-    return media.run_ytdlp(url, workdir, GuardProxy())
+def grabber(url: str, workdir: Path, limit: int | None) -> media.Grab:
+    return media.run_ytdlp(url, workdir, GuardProxy(), limit)
 
 
 def keep(m: media.MediaOutcome) -> None:
