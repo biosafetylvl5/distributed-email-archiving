@@ -32,6 +32,10 @@ Edge code lives in `cloudflare/`:
 | `*.sh`                   | Admin scripts wrapping `wrangler kv` (users, tags, export) and `mirror.sh` (rclone) |
 | `wrangler.toml.example`  | Template for the git-ignored `wrangler.toml`                   |
 
+`src/api/` is the subscription API on its own hostname (`API_HOSTNAME`, token auth,
+`tokens.ts`); `src/tagfields.ts` holds the subscription field rules it shares with the
+dashboard and `extension/` (the Manifest V3 browser extension, see `extension/README.md`).
+
 `processor/` (Python, uv) is described in `processor/README.md`: `extract.py`
 (MIME, embeds, links), `classify.py` (link classes and decisions),
 `guard.py` (SSRF and never-fetch guard), `inventory.py`, `fetch.py` (pinned-address

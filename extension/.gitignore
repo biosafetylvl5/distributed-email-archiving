@@ -1,0 +1,5 @@
+node_modules/
+dist/
+# web-ext sign output and AMO credentials
+web-ext-artifacts/
+.amo.env

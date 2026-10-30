@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Archive address</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="popup">
+<header>
+  <nav>
+    <button type="button" id="tab-site" class="tab" aria-pressed="true">This site</button>
+    <button type="button" id="tab-list" class="tab" aria-pressed="false">All subscriptions</button>
+  </nav>
+  <button type="button" id="open-options" class="link" title="Options">Options</button>
+</header>
+<p id="status" role="status" hidden></p>
+
+<section id="setup" hidden>
+  <p>Set the archive's API address and your token first.</p>
+  <button type="button" id="setup-options">Open options</button>
+</section>
+
+<section id="site" hidden>
+  <div id="found"></div>
+  <form id="create" hidden>
+    <h2>Add this newsletter</h2>
+    <label>Name <input id="c-name" maxlength="200" autocomplete="off"></label>
+    <label>Tag <input id="c-tag" maxlength="63" autocomplete="off" spellcheck="false"></label>
+    <p class="preview">Address: <code id="c-preview"></code></p>
+    <details>
+      <summary>More</summary>
+      <label>Description <textarea id="c-description" rows="3" maxlength="2000"></textarea></label>
+      <label>Sign-up link <input id="c-signup" type="url" maxlength="2048"></label>
+      <label>Note <input id="c-note" maxlength="500"></label>
+    </details>
+    <button type="submit" id="c-submit">Add and get address</button>
+    <p id="limits" class="muted"></p>
+  </form>
+</section>
+
+<section id="list" hidden>
+  <input id="search" type="search" placeholder="Search subscriptions" autocomplete="off">
+  <div id="items"></div>
+</section>
+
+<section id="edit" hidden>
+  <form id="edit-form">
+    <h2 id="e-title"></h2>
+    <label>Name <input id="e-name" maxlength="200"></label>
+    <label>Description <textarea id="e-description" rows="3" maxlength="2000"></textarea></label>
+    <label>Sign-up link <input id="e-signup" type="url" maxlength="2048"></label>
+    <label>Note <input id="e-note" maxlength="500"></label>
+    <p class="muted" id="e-admin"></p>
+    <div class="row">
+      <button type="submit">Save</button>
+      <button type="button" id="e-cancel" class="link">Cancel</button>
+    </div>
+  </form>
+</section>
+<script src="popup.js"></script>
+</body>
+</html>

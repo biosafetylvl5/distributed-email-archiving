@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Archive address: options</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="options">
+<h1>Archive address</h1>
+<p>Adds newsletters to your email archive and fills your archive address into their sign-up forms.
+Ask the archive's admin for the API address and a token for this browser.</p>
+<form id="form">
+  <label>API address <input id="api-url" type="url" placeholder="https://mail-api.example.org" required></label>
+  <label>Token <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="dea_…" required></label>
+  <fieldset>
+    <legend>Address to use</legend>
+    <label class="inline"><input type="radio" name="form" value="plus" checked> <code>you+tag@…</code></label>
+    <label class="inline"><input type="radio" name="form" value="underscore"> <code>you__tag@…</code> (for sign-up forms that refuse "+")</label>
+  </fieldset>
+  <button type="submit">Save and check</button>
+</form>
+<p id="status" role="status"></p>
+<p class="muted">The token is kept in this browser only. The extension reads a page (its address, title and
+site name) only when you click it or its menu item, and sends that only to the API above.</p>
+<script src="options.js"></script>
+</body>
+</html>

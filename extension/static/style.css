@@ -1,0 +1,30 @@
+:root{color-scheme:light dark;--muted:#6b6b6b;--line:#d0d0d0;--accent:#5b3fa0;--ok:#1e7a3a;--warn:#9a5b00;--err:#b42318}
+@media (prefers-color-scheme:dark){:root{--muted:#a0a0a0;--line:#444;--accent:#b49cf0;--ok:#6fcf8f;--warn:#f0b35b;--err:#f39b92}}
+body{font:13px/1.4 system-ui,sans-serif;margin:0}
+body.popup{width:360px;padding:.6rem}
+body.options{max-width:36rem;margin:1.5rem auto;padding:0 1rem;font-size:14px}
+header{display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem}
+nav{display:flex;gap:.2rem}
+.tab{border:1px solid var(--line);background:none;border-radius:4px;padding:.25rem .5rem;cursor:pointer;color:inherit}
+.tab[aria-pressed=true]{border-color:var(--accent);color:var(--accent);font-weight:600}
+h2{font-size:1em;margin:.6rem 0 .3rem}
+label{display:block;margin:.35rem 0}
+label.inline{display:inline-block;margin-right:1rem}
+input:not([type=radio]),textarea{display:block;width:100%;box-sizing:border-box;margin-top:.15rem;padding:.3rem;font:inherit}
+fieldset{border:1px solid var(--line);border-radius:4px;margin:.6rem 0}
+button{font:inherit;cursor:pointer}
+button[type=submit],.primary{background:var(--accent);color:#fff;border:0;border-radius:4px;padding:.35rem .7rem}
+.link{background:none;border:0;color:var(--accent);padding:0;text-decoration:underline}
+.muted{color:var(--muted)}
+.row{display:flex;gap:.6rem;align-items:center;margin-top:.4rem}
+.card{border:1px solid var(--line);border-radius:6px;padding:.45rem .55rem;margin:.4rem 0}
+.card .title{font-weight:600}
+.card code{display:block;margin:.25rem 0;word-break:break-all;user-select:all}
+.card .actions{display:flex;gap:.4rem;flex-wrap:wrap}
+.card .actions button{border:1px solid var(--line);background:none;color:inherit;border-radius:4px;padding:.15rem .5rem}
+.badge{font-size:.85em;border-radius:3px;padding:0 .3rem;margin-left:.3rem;border:1px solid currentColor}
+.approved{color:var(--ok)}.pending{color:var(--warn)}.blocked{color:var(--err)}
+#status{margin:.3rem 0;padding:.3rem .5rem;border-radius:4px;border:1px solid var(--line)}
+#status.error{border-color:var(--err);color:var(--err)}
+.preview code{word-break:break-all}
+#items{max-height:420px;overflow:auto}

@@ -1,0 +1,21 @@
+{
+  "name": "dea-subscribe-extension",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs chrome && node build.mjs firefox",
+    "package": "npm run build && node build.mjs package",
+    "lint:firefox": "web-ext lint --source-dir dist/firefox",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.0",
+    "esbuild": "^0.25.0",
+    "jsdom": "^26.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0",
+    "web-ext": "^8.0.0"
+  }
+}

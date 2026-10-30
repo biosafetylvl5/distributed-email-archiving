@@ -169,6 +169,9 @@ Bodies are JSON (`content-type: application/json`), errors are `{"error", "messa
 To enable it, add the `TOKENS` namespace id from `terraform output kv_namespace_ids` and a second
 custom-domain route (e.g. `mail-api.example.org`) to `wrangler.toml`, and set `API_HOSTNAME` to it.
 
+The [browser extension](extension/README.md) in `extension/` uses this API: it adds a
+newsletter from its sign-up page and fills the address into the form.
+
 For local development, `npm run dev:admin` serves the dashboard at `http://localhost:8787`
 against local simulated KV/R2, with auth skipped for localhost only.
 

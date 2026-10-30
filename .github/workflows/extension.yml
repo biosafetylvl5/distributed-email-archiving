@@ -1,0 +1,33 @@
+name: extension
+
+on:
+  push:
+    paths: ["extension/**", "cloudflare/src/tagfields.ts", "cloudflare/src/policy.ts", ".github/workflows/extension.yml"]
+  pull_request:
+    paths: ["extension/**", "cloudflare/src/tagfields.ts", "cloudflare/src/policy.ts", ".github/workflows/extension.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run package
+      - run: npm run lint:firefox
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive-address
+          path: extension/dist/*.zip
