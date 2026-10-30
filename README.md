@@ -168,6 +168,13 @@ Bodies are JSON (`content-type: application/json`), errors are `{"error", "messa
 
 To enable it, add the `TOKENS` namespace id from `terraform output kv_namespace_ids` and a second
 custom-domain route (e.g. `mail-api.example.org`) to `wrangler.toml`, and set `API_HOSTNAME` to it.
+`-var api_rate_limit=30` adds a Cloudflare rate limiting rule (`ratelimit.tf`) blocking an IP
+for 10 seconds once it makes more than that many `/v1/*` requests in 10 seconds; it fits the Free
+plan, which allows one such rule and matches on the path only, so it covers `/v1/` on every
+hostname in the zone.
+
+On the dashboard, Subscriptions → "Added through the API, last 7 days" lists the newest
+additions for review (the overview links to it when there are any).
 
 The [browser extension](extension/README.md) in `extension/` uses this API: it adds a
 newsletter from its sign-up page and fills the address into the form.

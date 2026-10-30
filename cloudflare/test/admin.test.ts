@@ -155,6 +155,36 @@ describe("subscriptions", () => {
     expect(tags.json("ann/pho")).toMatchObject({ user_note: "<from the footer>", source: "api", name: "Pho" });
   });
 
+  it("filters to recent API additions, pending or blocked, and keeps the filter across saves", async () => {
+    const { env, users, tags } = fakeEnv();
+    await users.put("ann", JSON.stringify({ active: true }));
+    const day = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString();
+    await tags.put("ann/old-api", JSON.stringify({ status: "approved", name: "Old Api", source: "api", created_at: day(8) }));
+    await tags.put("ann/new-api", JSON.stringify({ status: "approved", name: "New Api", source: "api", created_at: day(1) }));
+    await tags.put("ann/newer-api", JSON.stringify({ status: "pending", name: "Newer Api", source: "api", created_at: day(0) }));
+    await tags.put("ann/by-admin", JSON.stringify({ status: "blocked", name: "By Admin" }));
+    const page = async (q: string) => (await get(env, `/subscriptions${q}`)).text();
+
+    const api = await page("?show=api");
+    expect(api).toContain("<strong>Added through the API, last 7 days</strong>");
+    expect(api).not.toContain("Old Api");
+    expect(api).not.toContain("By Admin");
+    expect(api.indexOf("Newer Api")).toBeLessThan(api.indexOf("New Api"));
+    expect(api).toContain('name="show" value="api"');
+
+    expect(await page("?show=pending")).not.toContain("New Api<");
+    expect(await page("?show=blocked")).toContain("By Admin");
+    const all = await page("?show=nonsense");
+    for (const n of ["Old Api", "New Api", "Newer Api", "By Admin"]) expect(all).toContain(n);
+
+    const res = await post(env, "/users/ann/tags", { tag: "new-api", status: "blocked", back: "subscriptions", show: "api" });
+    expect(res.headers.get("location")).toMatch(/^\/subscriptions\?show=api&msg=/);
+    const res2 = await post(env, "/users/ann/tags", { tag: "new-api", status: "blocked", back: "subscriptions", show: "x" });
+    expect(res2.headers.get("location")).toMatch(/^\/subscriptions\?msg=/);
+
+    expect(await (await get(env, "/")).text()).toContain('<a href="/subscriptions?show=api">2 added through the API in the last 7 days</a>');
+  });
+
   it("sets a capture size limit and mirrors every limit to R2 for dea-capture", async () => {
     const { env, users, tags, archive } = fakeEnv();
     await users.put("ann", JSON.stringify({ active: true }));

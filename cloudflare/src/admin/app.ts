@@ -141,6 +141,8 @@ function configWarnings(env: Env): Html {
 // --- pages
 
 const QUIET_DAYS = 30;
+// the "added through the API" filter and overview link look back this far
+const API_RECENT_DAYS = 7;
 
 function bar(n: number, max: number, cls: string): Html {
   const pct = max > 0 ? Math.floor((n / max) * 100) : 0; // floor: two bars never exceed 100%
@@ -167,6 +169,7 @@ async function overview(ctx: Ctx): Promise<Response> {
   const active = users.filter((u) => u.record?.active).length;
   const byStatus = (s: string) => tags.filter((t) => t.record?.status === s).length;
   const withField = (f: "publish" | "sender_domain" | "signup_url") => tags.filter((t) => t.record?.[f]).length;
+  const recentApi = addedThroughApi(tags, now).length;
   const capFor = (scope: string) =>
     scope === "global"
       ? settings.global_daily_cap
@@ -201,7 +204,9 @@ async function overview(ctx: Ctx): Promise<Response> {
     html`${configWarnings(env)}
 <table><tr><th>Users</th><td>${active} active, ${users.length - active} disabled</td></tr>
 <tr><th>Subscriptions</th><td>${byStatus("approved")} approved, ${byStatus("pending")} pending, ${byStatus("blocked")} blocked
-<br><span class="muted">${withField("publish")} published · ${withField("sender_domain")} with a sender domain · ${withField("signup_url")} with a sign-up link</span></td></tr>
+<br><span class="muted">${withField("publish")} published · ${withField("sender_domain")} with a sender domain · ${withField("signup_url")} with a sign-up link</span>${
+  recentApi ? html`<br><a href="${subscriptionsPath("api")}">${recentApi} added through the API in the last ${API_RECENT_DAYS} days</a>` : ""
+}</td></tr>
 <tr><th>Policy mode</th><td>${settings.policy_mode}</td></tr>
 <tr><th>Receiving domain</th><td><code>${env.ARCHIVE_DOMAIN || "(any)"}</code></td></tr></table>
 
@@ -548,11 +553,13 @@ async function addUser(ctx: Ctx): Promise<Response> {
   return redirect(userPath(name), { msg: `Added ${name}` });
 }
 
-function tagForm(t: TagEntry, fromSubscriptions: boolean): Html {
+// `show`: from the Subscriptions page with that filter ("" for all); undefined
+// from a user's page
+function tagForm(t: TagEntry, show?: SubscriptionFilter): Html {
   const r = t.record;
   return html`<form method="post" action="${userPath(t.user)}/tags">
 <input type="hidden" name="tag" value="${t.tag}">
-${fromSubscriptions ? html`<input type="hidden" name="back" value="subscriptions">` : ""}
+${show !== undefined ? html`<input type="hidden" name="back" value="subscriptions"><input type="hidden" name="show" value="${show}">` : ""}
 <select name="status">${TAG_STATUSES.map(
     (s) => html`<option value="${s}" ${r?.status === s ? html`selected` : ""}>${s}</option>`,
   )}</select>
@@ -587,7 +594,7 @@ function tagSummary(t: TagEntry): Html {
   }`;
 }
 
-function tagTable(ctx: Ctx, tags: TagEntry[], withUser: boolean): Html {
+function tagTable(ctx: Ctx, tags: TagEntry[], withUser: boolean, show: SubscriptionFilter = ""): Html {
   if (tags.length === 0) return html`<p class="muted">No subscriptions.</p>`;
   return html`<table><tr>${withUser ? html`<th>User</th>` : ""}<th>Newsletter</th><th>Status</th><th>Address</th><th>Edit</th></tr>
 ${tags.map(
@@ -600,7 +607,7 @@ ${tags.map(
       ? html`<br><span class="muted">captures up to ${t.record.capture_limit_mb} MiB</span>`
       : ""
   }</td>
-<td><code>${address(ctx.env, t.user, t.tag)}</code></td><td>${tagForm(t, withUser)}</td></tr>`,
+<td><code>${address(ctx.env, t.user, t.tag)}</code></td><td>${tagForm(t, withUser ? show : undefined)}</td></tr>`,
 )}</table>`;
 }
 
@@ -690,7 +697,10 @@ async function setActive(ctx: Ctx, user: string): Promise<Response> {
 async function saveTag(ctx: Ctx, user: string): Promise<Response> {
   if (!(await getUser(ctx.env, user))) return redirect("/users", { err: `No user ${user}` });
   const form = await ctx.request.formData();
-  const back = field(form, "back") === "subscriptions" ? "/subscriptions" : userPath(user);
+  const back =
+    field(form, "back") === "subscriptions"
+      ? subscriptionsPath(subscriptionFilter(field(form, "show")))
+      : userPath(user);
   const tag = field(form, "tag").toLowerCase();
   if (!isValidTag(tag)) return redirect(back, { err: `Invalid tag: ${tag}` });
   const status = field(form, "status");
@@ -741,9 +751,53 @@ async function saveTag(ctx: Ctx, user: string): Promise<Response> {
   return redirect(back, { msg: `Saved ${user}/${tag} (${status})` });
 }
 
+// the Subscriptions page's filters (?show=), "" being all
+const SUBSCRIPTION_FILTERS = {
+  "": "All",
+  api: `Added through the API, last ${API_RECENT_DAYS} days`,
+  pending: "Pending",
+  blocked: "Blocked",
+} as const;
+type SubscriptionFilter = keyof typeof SUBSCRIPTION_FILTERS;
+
+function subscriptionFilter(value: string | null): SubscriptionFilter {
+  return value && Object.hasOwn(SUBSCRIPTION_FILTERS, value) ? (value as SubscriptionFilter) : "";
+}
+
+function subscriptionsPath(filter: SubscriptionFilter): string {
+  return filter ? `/subscriptions?show=${filter}` : "/subscriptions";
+}
+
+// added through the API since `days` ago, newest first
+function addedThroughApi(tags: TagEntry[], now: Date, days = API_RECENT_DAYS): TagEntry[] {
+  const since = new Date(now.getTime() - days * 86_400_000).toISOString();
+  return tags
+    .filter((t) => t.record?.source === "api" && (t.record.created_at ?? "") >= since)
+    .sort((a, b) => (b.record?.created_at ?? "").localeCompare(a.record?.created_at ?? ""));
+}
+
 async function subscriptionsPage(ctx: Ctx): Promise<Response> {
-  const tags = await listTags(ctx.env);
-  return show(ctx, "Subscriptions", tagTable(ctx, tags, true));
+  const filter = subscriptionFilter(ctx.url.searchParams.get("show"));
+  const all = await listTags(ctx.env);
+  const tags =
+    filter === "api"
+      ? addedThroughApi(all, new Date())
+      : filter
+        ? all.filter((t) => t.record?.status === filter)
+        : all;
+  const nav = (Object.keys(SUBSCRIPTION_FILTERS) as SubscriptionFilter[]).map((f, i) => {
+    const label = SUBSCRIPTION_FILTERS[f];
+    return html`${i ? " · " : ""}${
+      f === filter ? html`<strong>${label}</strong>` : html`<a href="${subscriptionsPath(f)}">${label}</a>`
+    }`;
+  });
+  return show(
+    ctx,
+    "Subscriptions",
+    html`<p class="muted">Show: ${nav}</p>
+${filter === "api" ? html`<p class="muted">Newest first. Block any you don't want; a blocked subscription can't be re-added through the API.</p>` : ""}
+${tagTable(ctx, tags, true, filter)}`,
+  );
 }
 
 const SETTING_LABELS: Record<SettingKey, string> = {
