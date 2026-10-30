@@ -146,14 +146,25 @@ Setup:
 ### Subscription API
 
 The same Worker can serve a small JSON API (`src/api/`) for a browser extension, so users can
-list (and, later, add) their own subscriptions. It runs on a hostname of its own with no Access
-app, and the Worker answers each hostname with one handler only, so the dashboard is never
-reachable there. Each request needs `Authorization: Bearer <token>`. Tokens are made and
-revoked on a user's dashboard page, are shown once and stored only as a SHA-256 hash in the
-`TOKENS` KV namespace, and stop working when the user is disabled.
+add and edit their own subscriptions. It runs on a hostname of its own with no Access app, and
+the Worker answers each hostname with one handler only, so the dashboard is never reachable
+there. Each request needs `Authorization: Bearer <token>`. Tokens are made and revoked on a
+user's dashboard page, are shown once and stored only as a SHA-256 hash in the `TOKENS` KV
+namespace, and stop working when the user is disabled.
 
-- `GET /v1/me`: the token's user and the archive domain
+- `GET /v1/me`: the token's user, the archive domain and the user's limits
 - `GET /v1/subscriptions`: the user's own subscriptions and their addresses (no admin notes)
+- `POST /v1/subscriptions`: add one, from `name`, `description`, `signup_url`, `user_note` and
+  an optional `tag` (otherwise made from the name or the sign-up site; never overwrites one)
+- `GET` or `PATCH /v1/subscriptions/<tag>`: read or edit one; only the fields sent change, an
+  empty string or `null` clears one, and `if_updated_at` refuses an edit to a stale copy (409)
+- `GET /v1/subscriptions/lookup?url=`: the user's subscriptions for a sign-up page, or its site
+
+Users can't set the status, sender domain, capture limit, publish flag or the admin's note
+(403). New subscriptions take the status in the `api_new_tag_status` setting (`approved` by
+default, so the newsletter's confirmation mail gets through), and each user may add
+`api_tags_per_day` a day and keep `api_tags_max` in all (10 and 200 by default; see Settings).
+Bodies are JSON (`content-type: application/json`), errors are `{"error", "message"}`.
 
 To enable it, add the `TOKENS` namespace id from `terraform output kv_namespace_ids` and a second
 custom-domain route (e.g. `mail-api.example.org`) to `wrangler.toml`, and set `API_HOSTNAME` to it.

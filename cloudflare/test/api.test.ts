@@ -11,9 +11,32 @@ const allow: Authenticator = async () => ({ ok: true, email: "admin@example.org"
 
 const call = (env: Env, path: string, token?: string, init: RequestInit = {}) =>
   handler.fetch!(
-    new Request(API + path, { ...init, headers: token ? { authorization: `Bearer ${token}` } : {} }) as never,
+    new Request(API + path, {
+      ...init,
+      headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(init.headers as object) },
+    }) as never,
     env,
   );
+
+const send = (env: Env, method: string, path: string, token: string, body: unknown) =>
+  call(env, path, token, {
+    method,
+    body: typeof body === "string" ? body : JSON.stringify(body),
+    headers: { "content-type": "application/json" },
+  });
+
+interface Sub {
+  tag: string;
+  status: string;
+  name: string | null;
+  description: string | null;
+  signup_url: string | null;
+  user_note: string | null;
+  source: string;
+  updated_at: string | null;
+  addresses: { plus: string };
+}
+const sub = async (r: Response) => ((await r.json()) as { subscription: Sub }).subscription;
 
 async function seeded() {
   const f = fakeEnv();
@@ -81,7 +104,10 @@ describe("API", () => {
     const r = await call(env, "/v1/me", token);
     expect(r.headers.get("content-type")).toMatch(/^application\/json/);
     expect(r.headers.get("access-control-allow-origin")).toBeNull();
-    expect(await r.json()).toEqual({ user: "ann", archive_domain: "mail.example.org", token_id: id });
+    expect(await r.json()).toEqual({
+      user: "ann", archive_domain: "mail.example.org", token_id: id,
+      limits: { subscriptions: 1, subscriptions_max: 200, added_today: 0, added_per_day: 10, new_status: "approved" },
+    }); // prettier-ignore
   });
 
   it("lists only the user's own subscriptions, without admin-only fields", async () => {
@@ -90,18 +116,23 @@ describe("API", () => {
     expect(body.subscriptions).toEqual([
       {
         tag: "ramen", status: "approved", name: "Ramen Weekly", description: null,
-        signup_url: "https://ramen.example.com/join", sender_domain: "mail.ramen.example.com",
-        capture_limit_mb: 50,
+        signup_url: "https://ramen.example.com/join", user_note: null, sender_domain: "mail.ramen.example.com",
+        capture_limit_mb: 50, source: "admin", created_at: null, updated_at: null,
         addresses: { plus: "ann+ramen@mail.example.org", underscore: "ann__ramen@mail.example.org" },
       },
     ]); // prettier-ignore
     expect(JSON.stringify(body)).not.toMatch(/admin only|publish|Bob/);
   });
 
-  it("is read-only for now, and 404s anything else", async () => {
+  it("405s other methods and 404s anything else", async () => {
     const { env, token } = await seeded();
-    expect((await call(env, "/v1/subscriptions", token, { method: "POST" })).status).toBe(405);
+    const r = await call(env, "/v1/subscriptions", token, { method: "DELETE" });
+    expect(r.status).toBe(405);
+    expect(r.headers.get("allow")).toBe("GET, POST");
+    expect((await call(env, "/v1/me", token, { method: "POST" })).status).toBe(405);
     expect((await call(env, "/v1/nope", token)).status).toBe(404);
+    expect((await call(env, "/v1/subscriptions/nope", token)).status).toBe(404);
+    expect((await call(env, "/v1/subscriptions/ramen", token)).status).toBe(200);
   });
 });
 
@@ -173,5 +204,144 @@ describe("dashboard tokens", () => {
     ); // prettier-ignore
     expect(cross.status).toBe(403);
     expect(tokens.data.size).toBe(0);
+  });
+});
+
+describe("adding subscriptions", () => {
+  it("adds one, approved, with a tag made from its name", async () => {
+    const { env, tags, ratelimit, token, id } = await seeded();
+    const r = await send(env, "POST", "/v1/subscriptions", token, {
+      name: "  Café  Weekly ", signup_url: "https://www.cafe.example.com/signup?ref=x", description: "Coffee\r\nnews",
+      user_note: "from the footer",
+    }); // prettier-ignore
+    expect(r.status).toBe(201);
+    const s = await sub(r);
+    expect(s).toMatchObject({
+      tag: "cafe-weekly", status: "approved", name: "Café Weekly", description: "Coffee\nnews",
+      signup_url: "https://www.cafe.example.com/signup?ref=x", user_note: "from the footer", source: "api",
+    }); // prettier-ignore
+    expect(s.addresses.plus).toBe("ann+cafe-weekly@mail.example.org");
+    expect(tags.json("ann/cafe-weekly")).toMatchObject({ source: "api", created_by: `token:${id}` });
+    expect([...ratelimit.data.keys()].some((k) => k.startsWith("api:new:ann:"))).toBe(true);
+  });
+
+  it("makes a tag from the sign-up site, and numbers clashes", async () => {
+    const { env, token } = await seeded();
+    const add = async () => sub(await send(env, "POST", "/v1/subscriptions", token, { signup_url: "https://news.ramen.example.co.uk/x" }));
+    expect((await add()).tag).toBe("ramen-2"); // "ramen" is taken
+    expect((await add()).tag).toBe("ramen-3");
+  });
+
+  it("uses a tag it's given, and never overwrites one", async () => {
+    const { env, tags, token } = await seeded();
+    const r = await send(env, "POST", "/v1/subscriptions", token, { tag: "Ramen", name: "Mine now" });
+    expect(r.status).toBe(409);
+    expect(((await r.json()) as { subscription: Sub }).subscription.name).toBe("Ramen Weekly");
+    expect(tags.json("ann/ramen")).toMatchObject({ name: "Ramen Weekly", note: "admin only" });
+    expect((await send(env, "POST", "/v1/subscriptions", token, { tag: "-bad" })).status).toBe(422);
+    expect((await sub(await send(env, "POST", "/v1/subscriptions", token, { tag: "Pho" }))).tag).toBe("pho");
+  });
+
+  it("refuses admin-only fields, unknown fields and bad values", async () => {
+    const { env, tags, token } = await seeded();
+    const before = tags.data.size;
+    const cases: [unknown, number][] = [
+      [{ name: "x", status: "approved" }, 403],
+      [{ name: "x", sender_domain: "example.com" }, 403],
+      [{ name: "x", capture_limit_mb: 5 }, 403],
+      [{ name: "x", note: "hi" }, 403],
+      [{ name: "x", publish: true }, 403],
+      [{ name: "x", colour: "red" }, 400],
+      [{ name: 5 }, 422],
+      [{ name: "x", signup_url: "javascript:alert(1)" }, 422],
+      [{ description: "no name or link" }, 422],
+      [[1], 400],
+      ["{nope", 400],
+    ];
+    for (const [body, status] of cases) {
+      expect([JSON.stringify(body), (await send(env, "POST", "/v1/subscriptions", token, body)).status]).toEqual([
+        JSON.stringify(body),
+        status,
+      ]);
+    }
+    const plain = await call(env, "/v1/subscriptions", token, { method: "POST", body: "{}" });
+    expect(plain.status).toBe(415);
+    const big = await send(env, "POST", "/v1/subscriptions", token, { name: "x".repeat(20000) });
+    expect(big.status).toBe(413);
+    expect(tags.data.size).toBe(before);
+  });
+
+  it("holds new ones as pending when the setting says so", async () => {
+    const { env, settings, token } = await seeded();
+    await settings.put("settings", JSON.stringify({ api_new_tag_status: "pending" }));
+    expect((await sub(await send(env, "POST", "/v1/subscriptions", token, { name: "Later" }))).status).toBe("pending");
+  });
+
+  it("caps additions per day and in total", async () => {
+    const { env, settings, token } = await seeded();
+    await settings.put("settings", JSON.stringify({ api_tags_per_day: 2 }));
+    for (const name of ["a", "b"]) expect((await send(env, "POST", "/v1/subscriptions", token, { name })).status).toBe(201);
+    // a refused request doesn't count against the day
+    expect((await send(env, "POST", "/v1/subscriptions", token, { name: "x", status: "approved" })).status).toBe(403);
+    const r = await send(env, "POST", "/v1/subscriptions", token, { name: "c" });
+    expect(r.status).toBe(429);
+    expect(Number(r.headers.get("retry-after"))).toBeGreaterThan(0);
+
+    await settings.put("settings", JSON.stringify({ api_tags_max: 3 }));
+    expect((await send(env, "POST", "/v1/subscriptions", token, { name: "d" })).status).toBe(429); // ramen, a, b
+  });
+});
+
+describe("editing subscriptions", () => {
+  it("changes only the fields sent; an empty value or null clears one", async () => {
+    const { env, tags, token } = await seeded();
+    const r = await send(env, "PATCH", "/v1/subscriptions/ramen", token, {
+      description: "Noodles", user_note: "mine", signup_url: null,
+    }); // prettier-ignore
+    expect(r.status).toBe(200);
+    const s = await sub(r);
+    expect(s).toMatchObject({ name: "Ramen Weekly", description: "Noodles", user_note: "mine", signup_url: null });
+    expect(s.updated_at).not.toBeNull();
+    // what the user can't see or set is kept
+    expect(tags.json("ann/ramen")).toMatchObject({ note: "admin only", publish: true, capture_limit_mb: 50, status: "approved" });
+  });
+
+  it("refuses admin-only fields and other users' tags", async () => {
+    const { env, tags, token } = await seeded();
+    expect((await send(env, "PATCH", "/v1/subscriptions/ramen", token, { status: "blocked" })).status).toBe(403);
+    expect((await send(env, "PATCH", "/v1/subscriptions/other", token, { name: "Ann's now" })).status).toBe(404);
+    expect(tags.json("bob/other")).toEqual({ status: "approved", name: "Bob's" });
+    expect(tags.json("ann/ramen")).toMatchObject({ status: "approved" });
+  });
+
+  it("refuses an edit to a version that's since changed", async () => {
+    const { env, token } = await seeded();
+    // never saved by the dashboard since updated_at was kept: null matches
+    const first = await sub(await send(env, "PATCH", "/v1/subscriptions/ramen", token, { if_updated_at: null, name: "A" }));
+    const stale = await send(env, "PATCH", "/v1/subscriptions/ramen", token, { if_updated_at: null, name: "B" });
+    expect(stale.status).toBe(409);
+    expect(((await stale.json()) as { subscription: Sub }).subscription.name).toBe("A");
+    const ok = await send(env, "PATCH", "/v1/subscriptions/ramen", token, { if_updated_at: first.updated_at, name: "B" });
+    expect(ok.status).toBe(200);
+  });
+
+  it("doesn't write or count an edit that changes nothing", async () => {
+    const { env, ratelimit, token } = await seeded();
+    const r = await send(env, "PATCH", "/v1/subscriptions/ramen", token, { name: "Ramen Weekly" });
+    expect((await sub(r)).updated_at).toBeNull();
+    expect(ratelimit.data.size).toBe(0);
+  });
+});
+
+describe("lookup", () => {
+  it("finds the user's subscriptions for a page, then for its site", async () => {
+    const { env, tags, token } = await seeded();
+    await tags.put("ann/ramen-extra", JSON.stringify({ status: "approved", signup_url: "https://ramen.example.com/extra" }));
+    await tags.put("bob/ramen", JSON.stringify({ status: "approved", signup_url: "https://ramen.example.com/join" }));
+    const r = await call(env, "/v1/subscriptions/lookup?url=" + encodeURIComponent("https://www.ramen.example.com/join/?utm=1#f"), token);
+    const body = (await r.json()) as { exact: Sub[]; same_site: Sub[] };
+    expect(body.exact.map((s) => s.tag)).toEqual(["ramen"]);
+    expect(body.same_site.map((s) => s.tag)).toEqual(["ramen-extra"]);
+    expect((await call(env, "/v1/subscriptions/lookup?url=ftp://x", token)).status).toBe(422);
   });
 });

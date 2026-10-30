@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { handleAdmin, type Authenticator } from "../src/admin/app";
 import type { Env } from "../src/env";
-import { fakeEnv } from "./fakes";
+import { fakeEnv, type FakeKV } from "./fakes";
+
+// a stored tag, less the time of its last save (checked on its own)
+function saved(kv: FakeKV, key: string): unknown {
+  const r = kv.json(key) as Record<string, unknown> | null;
+  if (!r) return r;
+  expect(r.updated_at).toMatch(/^\d{4}-\d\d-\d\dT/);
+  const { updated_at: _, ...rest } = r;
+  return rest;
+}
 
 const ORIGIN = "https://admin.example.org";
 const allow: Authenticator = async () => ({ ok: true, email: "admin@example.org" });
@@ -113,7 +122,7 @@ describe("subscriptions", () => {
     await users.put("ann", JSON.stringify({ active: true }));
 
     await post(env, "/users/ann/tags", { tag: "Ramen_Weekly", status: "approved", sender_domain: "Mail.Ramen.Example" });
-    expect(tags.json("ann/ramen_weekly")).toEqual({
+    expect(saved(tags, "ann/ramen_weekly")).toEqual({
       status: "approved",
       publish: false,
       sender_domain: "mail.ramen.example",
@@ -129,7 +138,21 @@ describe("subscriptions", () => {
       back: "subscriptions",
     });
     expect(res.headers.get("location")).toMatch(/^\/subscriptions\?/);
-    expect(tags.json("ann/ramen_weekly")).toEqual({ status: "blocked", publish: true, note: "spammy", custom: 1 });
+    expect(saved(tags, "ann/ramen_weekly")).toEqual({ status: "blocked", publish: true, note: "spammy", custom: 1 });
+  });
+
+  it("shows the user's note and marks subscriptions added through the API", async () => {
+    const { env, users, tags } = fakeEnv();
+    await users.put("ann", JSON.stringify({ active: true }));
+    await tags.put("ann/pho", JSON.stringify({
+      status: "approved", user_note: "<from the footer>", source: "api", created_at: "2026-10-30T01:02:03Z",
+    })); // prettier-ignore
+    const page = await (await handleAdmin(new Request("https://admin.example.org/subscriptions"), env, allow)).text();
+    expect(page).toContain("ann's note: &lt;from the footer&gt;");
+    expect(page).toContain("added by ann through the API on 2026-10-30");
+    // a dashboard save keeps them
+    await post(env, "/users/ann/tags", { tag: "pho", status: "approved", name: "Pho" });
+    expect(tags.json("ann/pho")).toMatchObject({ user_note: "<from the footer>", source: "api", name: "Pho" });
   });
 
   it("sets a capture size limit and mirrors every limit to R2 for dea-capture", async () => {
@@ -137,23 +160,23 @@ describe("subscriptions", () => {
     await users.put("ann", JSON.stringify({ active: true }));
     await tags.put("ann/other", JSON.stringify({ status: "approved", capture_limit_mb: 50 }));
     await post(env, "/users/ann/tags", { tag: "ramen", status: "approved", capture_limit_mb: "200" });
-    expect(tags.json("ann/ramen")).toMatchObject({ capture_limit_mb: 200 });
+    expect(saved(tags, "ann/ramen")).toMatchObject({ capture_limit_mb: 200 });
     const mirror = async () => JSON.parse(await (await archive.get("config/capture-limits.json"))!.text());
     expect((await mirror()).limits).toEqual({ "ann/other": 50 * 2 ** 20, "ann/ramen": 200 * 2 ** 20 });
     expect(await (await get(env, "/users/ann")).text()).toContain("captures up to 200 MiB");
 
     // the short form leaves it alone; blank clears it
     await post(env, "/users/ann/tags", { tag: "ramen", status: "blocked" });
-    expect(tags.json("ann/ramen")).toMatchObject({ capture_limit_mb: 200 });
+    expect(saved(tags, "ann/ramen")).toMatchObject({ capture_limit_mb: 200 });
     await post(env, "/users/ann/tags", { tag: "ramen", status: "approved", capture_limit_mb: "" });
-    expect(tags.json("ann/ramen")).not.toHaveProperty("capture_limit_mb");
+    expect(saved(tags, "ann/ramen")).not.toHaveProperty("capture_limit_mb");
     expect((await mirror()).limits).toEqual({ "ann/other": 50 * 2 ** 20 });
 
     for (const bad of ["0", "1.5", "-3", "lots", String(2 * 1024 * 1024)]) {
       const res = await post(env, "/users/ann/tags", { tag: "ramen", status: "approved", capture_limit_mb: bad });
       expect(new URLSearchParams((res.headers.get("location") ?? "").split("?")[1]).get("err"), bad).toContain("Invalid capture size limit");
     }
-    expect(tags.json("ann/ramen")).not.toHaveProperty("capture_limit_mb");
+    expect(saved(tags, "ann/ramen")).not.toHaveProperty("capture_limit_mb");
   });
 
   it("validates tag, status, sender domain and user", async () => {
@@ -173,13 +196,13 @@ describe("subscriptions", () => {
     await users.put("ann", JSON.stringify({ active: true }));
     const url = "https://ramen.example/subscribe?ref=a&b=\"x\"";
     await post(env, "/users/ann/tags", { tag: "ramen", status: "approved", signup_url: url });
-    expect(tags.json("ann/ramen")).toEqual({ status: "approved", publish: false, signup_url: url });
+    expect(saved(tags, "ann/ramen")).toEqual({ status: "approved", publish: false, signup_url: url });
 
     const body = await (await get(env, "/subscriptions")).text();
     expect(body).toContain('href="https://ramen.example/subscribe?ref=a&amp;b=&quot;x&quot;"');
 
     await post(env, "/users/ann/tags", { tag: "ramen", status: "approved", signup_url: "" });
-    expect(tags.json("ann/ramen")).toEqual({ status: "approved", publish: false });
+    expect(saved(tags, "ann/ramen")).toEqual({ status: "approved", publish: false });
   });
 
   it("stores and shows name, description and note", async () => {
@@ -192,7 +215,7 @@ describe("subscriptions", () => {
       description: "Noodles.\r\n<b>Every</b> week.",
       note: "signed up at the fair",
     });
-    expect(tags.json("ann/ramen")).toEqual({
+    expect(saved(tags, "ann/ramen")).toEqual({
       status: "approved",
       publish: false,
       name: "Ramen Weekly",
@@ -221,7 +244,7 @@ describe("subscriptions", () => {
     await tags.put("ann/ramen", JSON.stringify(full));
     // the user page's short "new tag" form has no description, note or link
     await post(env, "/users/ann/tags", { tag: "ramen", status: "approved", name: "Ramen", sender_domain: "" });
-    expect(tags.json("ann/ramen")).toEqual({ ...full, name: "Ramen", publish: false });
+    expect(saved(tags, "ann/ramen")).toEqual({ ...full, name: "Ramen", publish: false });
   });
 
   it("does not link sign-up URLs with unsafe schemes written directly to KV", async () => {

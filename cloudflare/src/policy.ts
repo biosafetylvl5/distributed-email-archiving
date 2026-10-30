@@ -38,6 +38,11 @@ export interface TagRecord {
   description?: string;
   signup_url?: string; // where the newsletter's sign-up form lives (http/https only)
   note?: string; // private admin note
+  user_note?: string; // the subscriber's own note, set through the API
+  source?: "api"; // added through the API (unset: by an admin)
+  created_at?: string; // ISO times; unset on tags from before they were kept
+  created_by?: string; // "token:<id>" for API-made tags
+  updated_at?: string; // last change by anyone (the API's edit-conflict check)
 }
 
 // Reasons carry no SMTP status codes — the platform (Cloudflare) or adapter

@@ -8,8 +8,7 @@ import {
   SETTING_KEYS,
   SETTINGS_KEY,
   VAR_NAMES,
-  parseCount,
-  parseMode,
+  parseSetting,
   resolveSettings,
   sanitizeOverrides,
   type Overrides,
@@ -27,6 +26,17 @@ import {
 } from "./retry";
 import { snapshot, STORAGE_AREAS, type Snapshot, type Storage } from "./summary";
 import { createToken, LABEL_MAX, listTokens, revokeToken } from "../api/tokens";
+import {
+  cleanDescription,
+  cleanName,
+  cleanNote,
+  DESCRIPTION_MAX,
+  HOSTNAME_RE,
+  isSignupUrl,
+  NAME_MAX,
+  NOTE_MAX,
+  TAG_STATUSES,
+} from "../tagfields";
 import { largest, serveFile, servable, type LargeFile } from "./files";
 import { findMessage, getViewMeta, issueSizes, rawMail, viewFile, type ViewMeta } from "./messages";
 import {
@@ -65,27 +75,9 @@ interface Ctx {
   email: string;
 }
 
-const TAG_STATUSES = ["approved", "pending", "blocked"] as const;
-const HOSTNAME_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
-
-const NAME_MAX = 200;
-const DESCRIPTION_MAX = 2000;
-const NOTE_MAX = 500;
 const CAPTURE_LIMIT_MAX_MB = 1024 * 1024; // 1 TiB: anything over is a typo
 const TEXT_FIELDS = ["name", "description", "sender_domain", "signup_url", "note"] as const;
 type TextField = (typeof TEXT_FIELDS)[number];
-
-// rendered as a link, so only http(s): never javascript:, data:, etc.
-// Also checked on display, since KV can be edited outside the dashboard
-function isSignupUrl(value: string): boolean {
-  if (value.length > 2048) return false;
-  try {
-    const u = new URL(value);
-    return (u.protocol === "https:" || u.protocol === "http:") && u.hostname !== "";
-  } catch {
-    return false;
-  }
-}
 
 function redirect(path: string, flash?: { msg?: string; err?: string }): Response {
   const q = new URLSearchParams();
@@ -584,7 +576,15 @@ function tagSummary(t: TagEntry): Html {
     r?.signup_url && isSignupUrl(r.signup_url)
       ? html`<div><a href="${r.signup_url}" rel="noopener noreferrer" target="_blank">sign-up page</a></div>`
       : ""
-  }${r?.note ? html`<div class="muted">Note: ${r.note}</div>` : ""}`;
+  }${r?.note ? html`<div class="muted">Note: ${r.note}</div>` : ""}${
+    r?.user_note ? html`<div class="muted">${t.user}'s note: ${r.user_note}</div>` : ""
+  }${
+    r?.source === "api"
+      ? html`<div class="muted" title="${r.created_at ?? ""}">added by ${t.user} through the API${
+          r.created_at ? ` on ${r.created_at.slice(0, 10)}` : ""
+        }</div>`
+      : ""
+  }`;
 }
 
 function tagTable(ctx: Ctx, tags: TagEntry[], withUser: boolean): Html {
@@ -711,11 +711,11 @@ async function saveTag(ctx: Ctx, user: string): Promise<Response> {
     return redirect(back, { err: `Invalid capture size limit (whole MiB, 1 to ${CAPTURE_LIMIT_MAX_MB}): ${limitText}` });
   }
   const text: Record<TextField, string> = {
-    name: field(form, "name").replace(/\s+/g, " ").slice(0, NAME_MAX),
-    description: field(form, "description").replace(/\r\n?/g, "\n").slice(0, DESCRIPTION_MAX),
+    name: cleanName(field(form, "name")),
+    description: cleanDescription(field(form, "description")),
     sender_domain: senderDomain,
     signup_url: signupUrl,
-    note: field(form, "note").slice(0, NOTE_MAX),
+    note: cleanNote(field(form, "note")),
   };
 
   const current = (await getTag(ctx.env, user, tag)) ?? ({} as Partial<TagRecord>);
@@ -735,6 +735,7 @@ async function saveTag(ctx: Ctx, user: string): Promise<Response> {
     if (limit === undefined) delete next.capture_limit_mb;
     else next.capture_limit_mb = limit;
   }
+  next.updated_at = new Date().toISOString();
   await putTag(ctx.env, user, tag, next);
   if (next.capture_limit_mb !== current.capture_limit_mb) await syncCaptureLimits(ctx.env);
   return redirect(back, { msg: `Saved ${user}/${tag} (${status})` });
@@ -751,6 +752,15 @@ const SETTING_LABELS: Record<SettingKey, string> = {
   global_daily_cap: "Global daily cap",
   tag_daily_cap: "Per-tag daily cap",
   untagged_daily_cap: "Bare-address daily cap",
+  api_new_tag_status: "Status of subscriptions added through the API",
+  api_tags_per_day: "Subscriptions each user may add per day (API)",
+  api_tags_max: "Subscriptions each user may have (API)",
+};
+
+// settings chosen from a list, with their choices
+const SETTING_CHOICES: Partial<Record<SettingKey, readonly string[]>> = {
+  policy_mode: ["strict", "quarantine"],
+  api_new_tag_status: ["approved", "pending"],
 };
 
 async function settingsPage(ctx: Ctx): Promise<Response> {
@@ -759,12 +769,11 @@ async function settingsPage(ctx: Ctx): Promise<Response> {
   const editable = Boolean(env.SETTINGS);
   const input = (key: SettingKey): Html => {
     const v = overrides[key];
-    if (key === "policy_mode") {
-      return html`<select name="policy_mode" ${editable ? "" : html`disabled`}>
+    const choices = SETTING_CHOICES[key];
+    if (choices) {
+      return html`<select name="${key}" ${editable ? "" : html`disabled`}>
 <option value="">(no override)</option>
-${(["strict", "quarantine"] as const).map(
-  (m) => html`<option value="${m}" ${v === m ? html`selected` : ""}>${m}</option>`,
-)}</select>`;
+${choices.map((m) => html`<option value="${m}" ${v === m ? html`selected` : ""}>${m}</option>`)}</select>`;
     }
     return html`<input type="number" min="1" step="1" name="${key}" value="${v ?? ""}" placeholder="(no override)" ${editable ? "" : html`disabled`}>`;
   };
@@ -792,7 +801,7 @@ async function saveSettings(ctx: Ctx): Promise<Response> {
   for (const key of SETTING_KEYS) {
     const raw = field(form, key);
     if (!raw) continue;
-    const v = key === "policy_mode" ? parseMode(raw) : parseCount(raw);
+    const v = parseSetting(key, raw);
     if (v === undefined) {
       return redirect("/settings", { err: `Invalid value for ${SETTING_LABELS[key]}: ${raw}` });
     }

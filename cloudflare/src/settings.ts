@@ -13,7 +13,14 @@ export interface Settings {
   global_daily_cap: number;
   tag_daily_cap: number;
   untagged_daily_cap: number;
+  // subscription API (src/api/): the status of subscriptions users add, and
+  // how many each user may add per day and keep in total
+  api_new_tag_status: NewTagStatus;
+  api_tags_per_day: number;
+  api_tags_max: number;
 }
+
+export type NewTagStatus = "approved" | "pending";
 
 export type SettingKey = keyof Settings;
 export type SettingSource = "override" | "config" | "default";
@@ -25,6 +32,9 @@ export interface SettingsVars {
   GLOBAL_DAILY_CAP?: string;
   TAG_DAILY_CAP?: string;
   UNTAGGED_DAILY_CAP?: string;
+  API_NEW_TAG_STATUS?: string;
+  API_TAGS_PER_DAY?: string;
+  API_TAGS_MAX?: string;
 }
 
 export const SETTINGS_KEY = "settings";
@@ -35,6 +45,9 @@ export const DEFAULTS: Settings = {
   global_daily_cap: 500,
   tag_daily_cap: 50,
   untagged_daily_cap: 10,
+  api_new_tag_status: "approved",
+  api_tags_per_day: 10,
+  api_tags_max: 200,
 };
 
 export const SETTING_KEYS = Object.keys(DEFAULTS) as SettingKey[];
@@ -45,11 +58,20 @@ export const VAR_NAMES: Record<SettingKey, keyof SettingsVars> = {
   global_daily_cap: "GLOBAL_DAILY_CAP",
   tag_daily_cap: "TAG_DAILY_CAP",
   untagged_daily_cap: "UNTAGGED_DAILY_CAP",
+  api_new_tag_status: "API_NEW_TAG_STATUS",
+  api_tags_per_day: "API_TAGS_PER_DAY",
+  api_tags_max: "API_TAGS_MAX",
 };
 
 export function parseMode(v: unknown): PolicyMode | undefined {
   const s = typeof v === "string" ? v.trim().toLowerCase() : "";
   return s === "strict" || s === "quarantine" ? s : undefined;
+}
+
+// "blocked" isn't offered: a subscription that can never receive mail is no use
+export function parseNewTagStatus(v: unknown): NewTagStatus | undefined {
+  const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+  return s === "approved" || s === "pending" ? s : undefined;
 }
 
 // positive integers only
@@ -60,8 +82,10 @@ export function parseCount(v: unknown): number | undefined {
   return Number.isSafeInteger(n) && n > 0 ? n : undefined;
 }
 
-function parseSetting(key: SettingKey, v: unknown): Settings[SettingKey] | undefined {
-  return key === "policy_mode" ? parseMode(v) : parseCount(v);
+export function parseSetting(key: SettingKey, v: unknown): Settings[SettingKey] | undefined {
+  if (key === "policy_mode") return parseMode(v);
+  if (key === "api_new_tag_status") return parseNewTagStatus(v);
+  return parseCount(v);
 }
 
 // keep only valid fields of whatever is stored in KV
