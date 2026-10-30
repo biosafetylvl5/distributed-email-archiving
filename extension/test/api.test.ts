@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Api, ApiError, type Subscription } from "../src/api";
 import { originPattern } from "../src/config";
-import { existingFor, findOrCreate, signupUrlOf } from "../src/flow";
+import { describeOther, existingFor, findOrCreate, signupUrlOf } from "../src/flow";
 
 const sub = (tag: string, extra: Partial<Subscription> = {}) =>
   ({ tag, status: "approved", addresses: { plus: `ann+${tag}@m.example.org`, underscore: `ann__${tag}@m.example.org` }, ...extra }) as Subscription;
@@ -62,10 +62,40 @@ describe("finding or adding a site's subscription", () => {
       [200, { exact: [], same_site: [] }],
       [201, { subscription: sub("ramen-weekly") }],
     ]);
-    const { sub: got, created } = await findOrCreate(api(), page);
+    const { sub: got, created } = (await findOrCreate(api(), page))!;
     expect(created).toBe(true);
     expect(got.tag).toBe("ramen-weekly");
     expect(JSON.parse(calls[1].init.body as string)).toEqual({ name: "Ramen Weekly", signup_url: "https://ramen.example.com/join" });
+  });
+});
+
+describe("someone else's subscription for the site", () => {
+  const page = { url: "https://ramen.example.com/join", title: "Ramen Weekly", siteName: "" };
+  const others = [{ name: "Ramen Weekly", status: "approved", match: "page" }];
+
+  it("is asked about before adding, and declining adds nothing", async () => {
+    const calls = mockFetch([[200, { exact: [], same_site: [], others }]]);
+    const seen: unknown[] = [];
+    const got = await findOrCreate(api(), page, async (o) => (seen.push(...o), false));
+    expect(got).toBeNull();
+    expect(seen).toEqual(others);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("adds when confirmed, and isn't asked about when the user has their own", async () => {
+    mockFetch([[200, { exact: [], same_site: [], others }], [201, { subscription: sub("ramen") }]]);
+    expect((await findOrCreate(api(), page, async () => true))?.created).toBe(true);
+    mockFetch([[200, { exact: [sub("mine")], same_site: [], others }]]);
+    const ask = vi.fn(async () => false);
+    expect((await findOrCreate(api(), page, ask))?.sub.tag).toBe("mine");
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("is described without its owner", () => {
+    expect(describeOther({ name: "Ramen Weekly", status: "approved", match: "page" })).toBe("Ramen Weekly (this page)");
+    expect(describeOther({ name: "Broth", status: "blocked", match: "site" })).toBe(
+      "Broth (elsewhere on this site, blocked by the admin)",
+    );
   });
 });
 

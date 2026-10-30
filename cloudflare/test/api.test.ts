@@ -344,4 +344,19 @@ describe("lookup", () => {
     expect(body.same_site.map((s) => s.tag)).toEqual(["ramen-extra"]);
     expect((await call(env, "/v1/subscriptions/lookup?url=ftp://x", token)).status).toBe(422);
   });
+
+  it("says what other users archive from the page or site, without saying who", async () => {
+    const { env, tags, token } = await seeded();
+    await tags.put("bob/ramen", JSON.stringify({ status: "approved", name: "Ramen Weekly", signup_url: "https://ramen.example.com/join", note: "secret", user_note: "mine" }));
+    await tags.put("cy/ramen-weekly", JSON.stringify({ status: "approved", name: "Ramen Weekly", signup_url: "https://www.ramen.example.com/join/" }));
+    await tags.put("cy/broth", JSON.stringify({ status: "blocked", signup_url: "https://ramen.example.com/broth" }));
+    await tags.put("cy/elsewhere", JSON.stringify({ status: "approved", name: "Pho", signup_url: "https://pho.example.com/join" }));
+    const r = await call(env, "/v1/subscriptions/lookup?url=" + encodeURIComponent("https://ramen.example.com/join"), token);
+    const body = (await r.json()) as { others: unknown[] };
+    expect(body.others).toEqual([
+      { name: "Ramen Weekly", status: "approved", match: "page" },
+      { name: "broth", status: "blocked", match: "site" },
+    ]);
+    expect(JSON.stringify(body)).not.toMatch(/bob|cy|secret|mine/);
+  });
 });

@@ -28,3 +28,5 @@ button[type=submit],.primary{background:var(--accent);color:#fff;border:0;border
 #status.error{border-color:var(--err);color:var(--err)}
 .preview code{word-break:break-all}
 #items{max-height:420px;overflow:auto}
+.notice{border:1px solid var(--warn);border-radius:6px;padding:.45rem .55rem;margin:.4rem 0}
+.notice ul{margin:.25rem 0 .3rem;padding-left:1.1rem}

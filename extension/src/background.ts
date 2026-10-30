@@ -4,7 +4,7 @@
 import { Api } from "./api";
 import { loadConfig } from "./config";
 import { ext } from "./ext";
-import { addressOf, fillInto, findOrCreate, pageInfo } from "./flow";
+import { addressOf, describeOther, fillInto, findOrCreate, pageInfo } from "./flow";
 import { isWebPage } from "./suggest";
 
 const MENU = "use-archive-address";
@@ -20,6 +20,15 @@ function tell(tabId: number, message: string): void {
     .catch(() => undefined);
 }
 
+async function ask(tabId: number, message: string): Promise<boolean> {
+  const [res] = await ext.scripting.executeScript({
+    target: { tabId },
+    func: (m: string) => confirm(m),
+    args: [message],
+  });
+  return res?.result === true;
+}
+
 ext.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== MENU || tab?.id === undefined || !isWebPage(tab.url)) return;
   const tabId = tab.id;
@@ -27,7 +36,16 @@ ext.contextMenus.onClicked.addListener(async (info, tab) => {
     const config = await loadConfig();
     const api = new Api(config);
     const page = await pageInfo(tab);
-    const { sub, created } = await findOrCreate(api, page);
+    const got = await findOrCreate(api, page, (others) =>
+      ask(
+        tabId,
+        "Already in the archive, added by someone else:\n" +
+          others.map((o) => `• ${describeOther(o)}`).join("\n") +
+          "\n\nAdd a subscription for you anyway?",
+      ),
+    );
+    if (!got) return;
+    const { sub, created } = got;
     const address = addressOf(sub, config.form);
     const filled = await fillInto(tabId, info.frameId, address);
     if (!filled) tell(tabId, `Couldn't find the email field. Your archive address here is ${address}`);

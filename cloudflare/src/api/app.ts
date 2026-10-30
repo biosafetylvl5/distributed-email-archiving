@@ -206,20 +206,35 @@ async function list(ctx: Ctx): Promise<Response> {
   });
 }
 
-// the user's subscriptions whose sign-up link is this page, or on this site
+// most of other users' matches a lookup returns
+const OTHERS_MAX = 10;
+
+// the user's subscriptions whose sign-up link is this page, or on this site;
+// and, as `others`, other users' (so a newsletter isn't archived twice), with
+// only the name, status and how it matched: never whose they are
 async function lookup(ctx: Ctx): Promise<Response> {
   const { env, caller, url } = ctx;
   const key = siteKey(url.searchParams.get("url") ?? "");
   if (!key) return error(422, "invalid", "url must be an http or https URL", { field: "url" });
-  const exact = [];
-  const sameSite = [];
-  for (const t of await listTags(env, caller.user)) {
-    if (!t.record || t.user !== caller.user || !t.record.signup_url) continue;
+  type Match = "page" | "site";
+  const exact: ReturnType<typeof publicTag>[] = [];
+  const sameSite: ReturnType<typeof publicTag>[] = [];
+  const others = new Map<string, { name: string; status: string; match: Match }>();
+  for (const t of await listTags(env)) {
+    if (!t.record?.signup_url) continue;
     const k = siteKey(t.record.signup_url);
-    if (k?.page === key.page) exact.push(publicTag(env, t.user, t.tag, t.record));
-    else if (k?.host === key.host) sameSite.push(publicTag(env, t.user, t.tag, t.record));
+    const match: Match | null = k?.page === key.page ? "page" : k?.host === key.host ? "site" : null;
+    if (!match) continue;
+    if (t.user === caller.user) {
+      (match === "page" ? exact : sameSite).push(publicTag(env, t.user, t.tag, t.record));
+    } else {
+      const other = { name: t.record.name || t.tag, status: t.record.status, match };
+      others.set(JSON.stringify(other), other);
+    }
   }
-  return json(200, { exact, same_site: sameSite });
+  const rank = (o: { match: string; status: string }) => (o.match === "page" ? 0 : 2) + (o.status === "approved" ? 0 : 1);
+  const othersList = [...others.values()].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+  return json(200, { exact, same_site: sameSite, others: othersList.slice(0, OTHERS_MAX) });
 }
 
 async function create(ctx: Ctx): Promise<Response> {

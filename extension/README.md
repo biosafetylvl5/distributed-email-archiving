@@ -7,14 +7,17 @@ admin makes for you on the dashboard.
 
 - **Popup, on a sign-up page:** shows your subscription for this page (or
   others on the same site); otherwise suggests a name and tag and adds it, with
-  a description, sign-up link and note under "More". Each subscription has
+  a description, sign-up link and note under "More". If someone else in the
+  archive already added a newsletter from this page or site, it says so (by
+  the newsletter's name only, never whose it is). Each subscription has
   Copy, Fill in (into the page's email field), Edit and Sign-up page.
 - **All subscriptions:** a searchable list; Edit changes the name,
   description, sign-up link and your note. Status, sender domain and capture
   limit are the admin's and shown read-only. An edit to a copy that has since
   changed is refused, and the latest is shown instead.
 - **Right-click on a form field:** "Use archive address for this site" finds or
-  adds this site's subscription and types its address into that field.
+  adds this site's subscription and types its address into that field; before
+  adding one that someone else already archives from there, it asks.
 
 One codebase, Manifest V3, for Chrome (121+) and Firefox (140+).
 

@@ -5,7 +5,7 @@ import { Api, ApiError, type Editable, type Me, type Subscription } from "./api"
 import { hasApiPermission, loadConfig, type Config } from "./config";
 import { byId, copyText, el } from "./dom";
 import { ext } from "./ext";
-import { addressOf, fillInto, pageInfo, signupUrlOf } from "./flow";
+import { addressOf, describeOther, fillInto, pageInfo, signupUrlOf } from "./flow";
 import type { PageInfo } from "./page";
 import { isWebPage, suggestName, suggestTag } from "./suggest";
 
@@ -97,9 +97,20 @@ async function showSite(): Promise<void> {
     return;
   }
   try {
-    const [{ exact, same_site }, me] = await Promise.all([api.lookup(page.url), api.me()]);
+    const [{ exact, same_site, others = [] }, me] = await Promise.all([api.lookup(page.url), api.me()]);
     for (const sub of exact) found.append(card(sub, { label: "Signed up on this page" }));
     for (const sub of same_site) found.append(card(sub, { label: "Elsewhere on this site" }));
+    if (exact.length === 0 && others.length) {
+      found.append(
+        el(
+          "div",
+          { class: "notice", role: "note" },
+          el("strong", {}, "Already in the archive, added by someone else:"),
+          el("ul", {}, ...others.map((o) => el("li", {}, describeOther(o)))),
+          "No need to add it again, unless it's a different newsletter.",
+        ),
+      );
+    }
     if (exact.length === 0) showCreate(me, same_site.length > 0);
   } catch (err) {
     failed(err);

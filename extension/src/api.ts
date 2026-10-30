@@ -30,9 +30,17 @@ export interface Me {
   };
 }
 
+// another user's subscription matching a page: never whose it is
+export interface Other {
+  name: string;
+  status: Subscription["status"];
+  match: "page" | "site";
+}
+
 export interface Lookup {
   exact: Subscription[];
   same_site: Subscription[];
+  others?: Other[]; // absent from older servers
 }
 
 // what users may set (the rest is the admin's)

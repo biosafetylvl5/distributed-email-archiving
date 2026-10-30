@@ -158,7 +158,9 @@ namespace, and stop working when the user is disabled.
   an optional `tag` (otherwise made from the name or the sign-up site; never overwrites one)
 - `GET` or `PATCH /v1/subscriptions/<tag>`: read or edit one; only the fields sent change, an
   empty string or `null` clears one, and `if_updated_at` refuses an edit to a stale copy (409)
-- `GET /v1/subscriptions/lookup?url=`: the user's subscriptions for a sign-up page, or its site
+- `GET /v1/subscriptions/lookup?url=`: the user's subscriptions for a sign-up page, or its site,
+  and as `others` other users' (only their name, status and whether the page or just the site
+  matched, never whose), so a newsletter already archived isn't added twice
 
 Users can't set the status, sender domain, capture limit, publish flag or the admin's note
 (403). New subscriptions take the status in the `api_new_tag_status` setting (`approved` by
