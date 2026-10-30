@@ -15,4 +15,9 @@ export interface Env extends SettingsVars {
   ACCESS_AUD?: string; // Access application audience tag
   ADMIN_EMAILS?: string; // optional comma-separated allowlist
   ALLOW_LOCAL_NO_AUTH?: string; // "true" skips auth for localhost only (wrangler dev)
+
+  // subscription API for the browser extension (src/api/): served only on
+  // this hostname, which has no Access app; off when unset
+  API_HOSTNAME?: string; // e.g. mail-api.example.org
+  TOKENS?: KVNamespace; // per-user API tokens
 }

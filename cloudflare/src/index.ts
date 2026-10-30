@@ -10,9 +10,11 @@
 //   - throw           -> transient failure, well-behaved senders retry later
 //   - R2 put is authoritative; backup-forward failures are logged, never fatal
 //
-// fetch() serves the admin dashboard (src/admin/), never on the mail path
+// fetch() serves the admin dashboard (src/admin/) and, on its own hostname, the
+// subscription API (src/api/); never on the mail path
 
 import { handleAdmin } from "./admin/app";
+import { handleApi } from "./api/app";
 import type { Env } from "./env";
 import {
   decide,
@@ -153,6 +155,10 @@ const handler = {
   },
 
   async fetch(request: Request, env: Env): Promise<Response> {
+    // each hostname gets one handler: the dashboard is never served on the
+    // API's hostname (which has no Access app), nor the API on the dashboard's
+    const api = (env.API_HOSTNAME ?? "").trim().toLowerCase();
+    if (api && new URL(request.url).hostname === api) return handleApi(request, env);
     return handleAdmin(request, env);
   },
 } satisfies ExportedHandler<Env>;

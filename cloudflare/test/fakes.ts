@@ -119,6 +119,7 @@ export interface FakeEnv {
   tags: FakeKV;
   ratelimit: FakeKV;
   settings: FakeKV;
+  tokens: FakeKV;
   archive: FakeR2;
 }
 
@@ -127,6 +128,7 @@ export function fakeEnv(vars: Partial<Env> = {}, withSettings = true): FakeEnv {
   const tags = new FakeKV();
   const ratelimit = new FakeKV();
   const settings = new FakeKV();
+  const tokens = new FakeKV();
   const archive = new FakeR2();
   const env = {
     USERS: users,
@@ -134,9 +136,11 @@ export function fakeEnv(vars: Partial<Env> = {}, withSettings = true): FakeEnv {
     RATELIMIT: ratelimit,
     SETTINGS: withSettings ? settings : undefined,
     ARCHIVE: archive,
+    TOKENS: tokens,
+    API_HOSTNAME: "mail-api.example.org",
     BACKUP_MAILBOX: "backup@example.net",
     ARCHIVE_DOMAIN: "mail.example.org",
     ...vars,
   } as unknown as Env;
-  return { env, users, tags, ratelimit, settings, archive };
+  return { env, users, tags, ratelimit, settings, tokens, archive };
 }

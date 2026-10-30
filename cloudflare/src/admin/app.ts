@@ -26,6 +26,7 @@ import {
   type RetryResult,
 } from "./retry";
 import { snapshot, STORAGE_AREAS, type Snapshot, type Storage } from "./summary";
+import { createToken, LABEL_MAX, listTokens, revokeToken } from "../api/tokens";
 import { largest, serveFile, servable, type LargeFile } from "./files";
 import { findMessage, getViewMeta, issueSizes, rawMail, viewFile, type ViewMeta } from "./messages";
 import {
@@ -603,7 +604,58 @@ ${tags.map(
 )}</table>`;
 }
 
-async function userPage(ctx: Ctx, user: string): Promise<Response> {
+async function tokensSection(ctx: Ctx, user: string, created?: { token: string; label: string }): Promise<Html> {
+  const { env } = ctx;
+  if (!env.TOKENS) return html`<h2>API tokens</h2><p class="muted">Needs the TOKENS KV binding.</p>`;
+  const tokens = await listTokens(env, user);
+  const now = new Date();
+  const when = (iso: string | null) =>
+    iso ? html`<span title="${iso}">${agoTime(new Date(iso), now)}</span>` : html`<span class="muted">never</span>`;
+  return html`<h2>API tokens</h2>
+<p class="muted">For the browser extension: each lets ${user} list and add their own subscriptions${
+    env.API_HOSTNAME ? html` at <code>https://${env.API_HOSTNAME}/</code>` : html` (the API is off: API_HOSTNAME isn't set)`
+  }. Make one per browser, so each can be revoked alone.</p>
+${
+  created
+    ? html`<div class="msg ok">New token <strong>${created.label}</strong>. Copy it now: it won't be shown again.<br>
+<code style="user-select:all">${created.token}</code></div>`
+    : ""
+}
+${
+  tokens.length === 0
+    ? html`<p class="muted">No tokens.</p>`
+    : html`<table><tr><th>Label</th><th>Starts</th><th>Created</th><th>Last used</th><th></th></tr>
+${tokens.map(
+  (t) => html`<tr><td>${t.label}</td><td><code>${t.hint}…</code></td><td>${when(t.created_at)} <span class="muted">by ${t.created_by}</span></td>
+<td>${when(t.lastUsedAt)}</td><td><form class="inline" method="post" action="${userPath(user)}/tokens/revoke">
+<input type="hidden" name="id" value="${t.id}"><button>Revoke</button></form></td></tr>`,
+)}</table>`
+}
+<form method="post" action="${userPath(user)}/tokens">
+<label>New token for <input type="text" name="label" placeholder="e.g. Firefox on laptop" maxlength="${LABEL_MAX}" required></label>
+<button>Create token</button></form>`;
+}
+
+async function addToken(ctx: Ctx, user: string): Promise<Response> {
+  if (!(await getUser(ctx.env, user))) return redirect("/users", { err: `No user ${user}` });
+  if (!ctx.env.TOKENS) return redirect(userPath(user), { err: "No TOKENS KV binding" });
+  const label = field(await ctx.request.formData(), "label").replace(/\s+/g, " ").slice(0, LABEL_MAX);
+  if (!label) return redirect(userPath(user), { err: "A token needs a label" });
+  const { token } = await createToken(ctx.env, user, label, ctx.email);
+  console.log(JSON.stringify({ evt: "token_created", user, by: ctx.email }));
+  // shown in this response only: never in a redirect URL
+  return userPage(ctx, user, { token, label });
+}
+
+async function dropToken(ctx: Ctx, user: string): Promise<Response> {
+  if (!ctx.env.TOKENS) return redirect(userPath(user), { err: "No TOKENS KV binding" });
+  const id = field(await ctx.request.formData(), "id");
+  const ok = await revokeToken(ctx.env, user, id);
+  if (ok) console.log(JSON.stringify({ evt: "token_revoked", user, id, by: ctx.email }));
+  return redirect(userPath(user), ok ? { msg: "Token revoked" } : { err: "No such token" });
+}
+
+async function userPage(ctx: Ctx, user: string, created?: { token: string; label: string }): Promise<Response> {
   const record = await getUser(ctx.env, user);
   if (!record) return show(ctx, "Not found", html`<p>No user ${user}.</p>`, 404);
   const tags = await listTags(ctx.env, user);
@@ -623,7 +675,8 @@ async function userPage(ctx: Ctx, user: string): Promise<Response> {
 <input type="text" name="sender_domain" placeholder="sender domain (optional)">
 <input type="url" name="signup_url" placeholder="sign-up link (optional)">
 <button>Approve</button></form>
-${tagTable(ctx, tags, false)}`,
+${tagTable(ctx, tags, false)}
+${await tokensSection(ctx, user, created)}`,
   );
 }
 
@@ -911,7 +964,7 @@ async function route(ctx: Ctx): Promise<Response> {
   const { request, url } = ctx;
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const method = request.method;
-  const userMatch = /^\/users\/([a-z0-9.-]+)(\/active|\/tags)?$/.exec(path);
+  const userMatch = /^\/users\/([a-z0-9.-]+)(\/active|\/tags|\/tokens|\/tokens\/revoke)?$/.exec(path);
   const msgMatch = /^\/messages\/([0-9a-f]{64})(?:\/(source|raw)|\/view\/(.+))?$/.exec(path);
 
   if (method === "GET" || method === "HEAD") {
@@ -947,7 +1000,10 @@ async function route(ctx: Ctx): Promise<Response> {
     if (userMatch && userMatch[2]) {
       const user = userMatch[1];
       if (!isValidUser(user)) return text(404, "not found");
-      return userMatch[2] === "/active" ? setActive(ctx, user) : saveTag(ctx, user);
+      if (userMatch[2] === "/active") return setActive(ctx, user);
+      if (userMatch[2] === "/tokens") return addToken(ctx, user);
+      if (userMatch[2] === "/tokens/revoke") return dropToken(ctx, user);
+      return saveTag(ctx, user);
     }
     return text(404, "not found");
   }

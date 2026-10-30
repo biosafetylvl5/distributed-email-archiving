@@ -41,3 +41,9 @@ resource "cloudflare_workers_kv_namespace" "settings" {
   account_id = var.account_id
   title      = "newsletter-settings"
 }
+
+# per-user tokens for the subscription API (src/api/)
+resource "cloudflare_workers_kv_namespace" "tokens" {
+  account_id = var.account_id
+  title      = "newsletter-tokens"
+}

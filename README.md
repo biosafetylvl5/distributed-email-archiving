@@ -143,6 +143,21 @@ Setup:
    - set `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, and optionally `ADMIN_EMAILS`
 4. `npm run deploy`, then open `https://admin.example.org`.
 
+### Subscription API
+
+The same Worker can serve a small JSON API (`src/api/`) for a browser extension, so users can
+list (and, later, add) their own subscriptions. It runs on a hostname of its own with no Access
+app, and the Worker answers each hostname with one handler only, so the dashboard is never
+reachable there. Each request needs `Authorization: Bearer <token>`. Tokens are made and
+revoked on a user's dashboard page, are shown once and stored only as a SHA-256 hash in the
+`TOKENS` KV namespace, and stop working when the user is disabled.
+
+- `GET /v1/me`: the token's user and the archive domain
+- `GET /v1/subscriptions`: the user's own subscriptions and their addresses (no admin notes)
+
+To enable it, add the `TOKENS` namespace id from `terraform output kv_namespace_ids` and a second
+custom-domain route (e.g. `mail-api.example.org`) to `wrangler.toml`, and set `API_HOSTNAME` to it.
+
 For local development, `npm run dev:admin` serves the dashboard at `http://localhost:8787`
 against local simulated KV/R2, with auth skipped for localhost only.
 

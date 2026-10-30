@@ -60,6 +60,7 @@ output "kv_namespace_ids" {
     TAGS      = cloudflare_workers_kv_namespace.tags.id
     RATELIMIT = cloudflare_workers_kv_namespace.ratelimit.id
     SETTINGS  = cloudflare_workers_kv_namespace.settings.id
+    TOKENS    = cloudflare_workers_kv_namespace.tokens.id
   }
 }
 
