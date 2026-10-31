@@ -10,11 +10,10 @@ default-deny recipient policy, enforces daily caps, writes the raw `.eml` to R2,
 and forwards a backup copy. The same Worker's `fetch()` serves an admin
 dashboard behind Cloudflare Access.
 
-`processor/` holds `dea-capture`, the start of the link and embed archiver
-(phase 1: classification, safety guards, and the `issue` stage that stores
-each message's embeds, run as a courier service). Link capture, the rest of the processor, the publishing pass, and the site
-shown in the README diagram are **not in this repo**. Don't add references to
-them as if they exist.
+`processor/` holds `dea-capture`: classification, embed storage, link resolution,
+and direct, page, media and gallery capture, with retries and Wayback fallback,
+run as a courier service. The publishing pass and public site in the README's
+goal diagram are **not in this repo**.
 
 ## Layout
 
@@ -40,8 +39,11 @@ dashboard and `extension/` (the Manifest V3 browser extension, see `extension/RE
 (MIME, embeds, links), `classify.py` (link classes and decisions),
 `guard.py` (SSRF and never-fetch guard), `inventory.py`, `fetch.py` (pinned-address
 HTTP, redirect following), `store.py` (R2/S3 or a directory), `issue.py` (the
-`issue` stage), `health.py` (liveness), `cli.py`. `deploy/service.yaml` is the
-courier service; `Dockerfile` and `.github/workflows/processor.yml` build and
+`issue` stage), `capture.py` (queue and retries), `page.py`, `media.py`, `gallery.py`
+(capture adapters), `proxy.py` (tool egress), `view.py` (sanitized mail),
+`summary.py` (dashboard snapshots), `health.py` (liveness), `cli.py`.
+`deploy/service.yaml` is the courier service; `Dockerfile` and
+`.github/workflows/processor.yml` build and
 publish the image.
 
 ## Commands
@@ -53,7 +55,7 @@ Courier is pinned to a commit in `pyproject.toml`; bump it there and `uv lock`.
 Run from `cloudflare/`:
 
 ```sh
-npm install
+npm ci
 npm test            # vitest
 npm run typecheck   # tsc --noEmit
 npm run dev:admin   # local dashboard on simulated KV/R2, auth skipped for localhost
@@ -76,11 +78,13 @@ Run wrangler under Node, not Bun: `wrangler dev` under Bun answers every request
 - User names may not contain `_`, so `__` is an unambiguous tag separator.
   Addresses are lowercased before matching.
 - **Admin auth fails closed.** Every dashboard request goes through
-  `authenticate()`; POSTs also require a same-origin `Origin` header. Don't add
-  routes that bypass `handleAdmin`, and don't widen `ALLOW_LOCAL_NO_AUTH` beyond localhost.
+  `authenticate()`; POSTs require a matching `Origin` **or**
+  `Sec-Fetch-Site: same-origin`. Don't bypass `handleAdmin` or widen
+  `ALLOW_LOCAL_NO_AUTH` beyond localhost.
 - **Escape all output.** Build HTML with the `html` template in `src/admin/html.ts`,
   which escapes interpolations; mail headers and KV values are untrusted.
-  Never render stored mail inline; quarantine downloads are `attachment` + octet-stream.
+  Never render raw mail as unsandboxed HTML. The sanitized view is sandboxed;
+  quarantine downloads are `attachment` + octet-stream.
 - KV records (`USERS`, `TAGS`) are shared with the `*ctl.sh` scripts. Edits are
   read-modify-write and must preserve unknown fields.
 - Invalid settings fall back to the next layer, ending at strict defaults; never fail open.
@@ -88,10 +92,13 @@ Run wrangler under Node, not Bun: `wrangler dev` under Bun answers every request
   outside this repo. Mention policy behavior changes in your summary so the
   port can be updated.
 
-- **`dea-capture` must never act as the subscriber.** Every request goes
-  through `guard.GuardedFetcher`. Rules about what not to fetch (unsubscribe,
-  preferences, actions, auth tokens) err towards skip. Any new ESP pattern gets
-  a synthetic fixture whose forbidden URLs contain `SECRET` or `FORBIDDEN`.
+- **`dea-capture` must never act as the subscriber.** Direct requests use
+  `guard.GuardedFetcher`; external tools use `proxy.GuardProxy`, and certificate
+  issuer fetches use destination checks. Proxy checks guard addresses, not
+  subscriber actions inside opaque HTTPS tunnels; seed checks are not hop checks.
+  Unsubscribe, preferences, actions and auth-token rules err towards skip.
+  Any new ESP pattern gets a synthetic fixture whose forbidden URLs contain
+  `SECRET` or `FORBIDDEN`.
   Never add real messages as fixtures. Classifier changes show up as diffs to
   the golden `tests/fixtures/*.inventory.json`; review them.
 

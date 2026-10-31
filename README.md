@@ -2,12 +2,13 @@
 
 Archives email newsletters as raw `.eml` plus a browsable HTML copy with remote dependencies.
 
-**Status:** this repo currently contains only the Cloudflare edge adapter
-(Email Routing + ingest Worker + R2/KV via Terraform), its admin scripts, and an admin dashboard,
-plus the first piece of the processor: [`processor/`](processor/README.md) (`dea-capture`), which
-works out which linked and embedded content to archive without acting as the subscriber.
-It doesn't fetch anything yet. Everything else after `S3 incoming/` below is the goal
-architecture and not yet published.
+**Status:**
+
+- **Implemented:** Cloudflare Email Routing + ingest Worker + R2/KV Terraform,
+  admin dashboard/scripts, subscription API and browser extension.
+  [`dea-capture`](processor/README.md) stores embeds, resolves links and captures
+  direct files, pages, media and galleries, with retries and Wayback fallback.
+- **Planned:** self-hosted SMTP ingest, the publishing pass and public static site.
 
 Goal architecture:
 
@@ -81,7 +82,7 @@ Accepted mail is written to the `newsletter-archive` R2 bucket under
        and fill out `BACKUP_MAILBOX` and `ARCHIVE_DOMAIN`
     3. Deploy the worker:
        ```sh
-       npm install && npm test && npm run deploy
+       npm ci && npm test && npm run deploy
        ```
 
 4. **Add a user** from the [admin dashboard](#admin-dashboard), or with the scripts

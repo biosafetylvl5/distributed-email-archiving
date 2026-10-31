@@ -45,10 +45,11 @@ reader's mail client loads them too.
 
 ## Safety guards
 
-Every request goes through `guard.GuardedFetcher`, whatever the classifier
-decided:
+Direct requests go through `guard.GuardedFetcher`, whatever the classifier
+decided. External tools use `proxy.GuardProxy`; certificate issuer fetches use
+`check_destination` directly.
 
-- **Links and redirect hops:** anything that classifies as unsubscribe,
+- **Direct links and redirect hops:** anything that classifies as unsubscribe,
   action, non-web or an in-message anchor is refused, and so is anything
   still carrying an auth parameter.
 - **All requests:** only `http` and `https`, and no credentials in the URL.
@@ -70,8 +71,11 @@ so `localhost` goes through the proxy too and is refused (the crawler's
 redis and the browser's debugging port listen there). The proxy tunnels TLS
 on port 443 and forwards plain HTTP on port 80, and refuses everything else.
 browsertrix-crawler turns off the browser's certificate checks whenever a
-proxy is set, so the proxy checks instead: before the first tunnel to a host
-and address, it completes its own verified TLS handshake with them.
+proxy is set. The proxy probes certificates with a separate verified handshake,
+not the connection carrying browser traffic; this is an accepted TLS-integrity
+risk, not end-to-end certificate verification. Tool seeds get link-safety checks,
+but subsequent HTTPS requests are opaque to the proxy and get address checks
+only. Certificate issuer URLs also get address checks, not subscriber-action checks.
 
 ## The `issue` stage
 
