@@ -17,7 +17,7 @@ const META = {
   view_version: 1,
   rendered_at: "2026-10-29T10:00:00Z",
   source: `s3://bucket/${KEY}`,
-  headers: { subject: "October <update>", from: "Writer <w@example.com>", date: "Sun, 25 Oct 2026 08:00:00 +0000" },
+  headers: { subject: "October <update>", from: "Writer <w@example.com>", to: "reader@example.org", date: "Sun, 25 Oct 2026 08:00:00 +0000" },
   body: "html",
   parts: [
     { content_type: "text/html", bytes: 900 },
@@ -64,6 +64,8 @@ describe("message page", () => {
     const body = await res.text();
     expect(body).toContain("October &lt;update&gt;");
     expect(body).not.toContain("<update>");
+    expect(body).not.toContain("reader@example.org");
+    expect(body).not.toContain("<dt>To</dt>");
     expect(body).toContain(`<iframe class="mail" src="/messages/${SHA}/view/index.html"`);
     expect(body).toContain('sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"');
     expect(body).toContain("2 tracking pixels");
@@ -126,9 +128,14 @@ describe("message page", () => {
     const res = await get(env, `/messages/${SHA}?day=2026-10-25`);
     const body = await res.text();
     expect(body).toContain("hasn't rendered this message yet");
-    expect(body).toContain(`/messages/${SHA}/source`);
     expect(body).not.toContain("<iframe");
-    expect((await get(env, `/messages/${SHA}/source?day=2026-10-25`)).status).toBe(200);
+    for (const kind of ["source", "raw"]) {
+      const link = new RegExp(`href="(/messages/${SHA}/${kind}[^\"]*)"`).exec(body)?.[1];
+      expect(link).toBe(`/messages/${SHA}/${kind}?day=2026-10-25`);
+      const download = await get(env, link!);
+      expect(download.status).toBe(200);
+      expect(await download.text()).toBe(EML);
+    }
     expect((await get(env, `/messages/${SHA}/source?day=../x`)).status).toBe(404);
   });
 

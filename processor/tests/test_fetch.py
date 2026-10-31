@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import threading
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,6 +22,19 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self.seen.append((self.path, self.headers.get("Host"), self.headers.get("User-Agent")))
+        if self.path == "/delayed-headers":
+            time.sleep(0.15)
+        if self.path in {"/slow-body", "/slow-headers"}:
+            data = b"x" * 50
+            head = b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\n"
+            try:
+                self.connection.sendall(head if self.path == "/slow-body" else b"")
+                for byte in data if self.path == "/slow-body" else head + data:
+                    self.connection.sendall(bytes([byte]))
+                    time.sleep(0.02)
+            except OSError:
+                pass
+            return
         if self.path == "/big":
             body = b"x" * 5000
         elif self.path == "/redirect":
@@ -85,6 +99,24 @@ def test_truncate_cuts_instead_of_raising(server: int) -> None:
     f = HttpFetcher(max_bytes=1000, truncate=True, _https=False)
     resp = f.get(f"http://x.invalid:{server}/big", addresses=LOCAL)
     assert resp.body == b"x" * 1000
+
+
+@pytest.mark.parametrize("path", ["/slow-body", "/slow-headers"])
+def test_deadline_interrupts_slow_drip_reads(server: int, path: str) -> None:
+    started = time.monotonic()
+    with pytest.raises(FetchError):
+        HttpFetcher(total_timeout=0.15, _https=False).get(
+            f"http://example.org:{server}{path}", addresses=LOCAL
+        )
+    assert time.monotonic() - started < 0.6
+
+
+def test_response_timeout_is_not_the_connect_timeout(server: int) -> None:
+    # Headers arrive after the connect timeout, but within the response deadline.
+    response = HttpFetcher(connect_timeout=0.05, total_timeout=3, _https=False).get(
+        f"http://example.org:{server}/delayed-headers", addresses=LOCAL
+    )
+    assert response.status == 200 and response.body == b"\x89PNG fake"
 
 
 def test_unreachable_is_retryable() -> None:

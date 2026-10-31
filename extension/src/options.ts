@@ -24,11 +24,15 @@ async function start(): Promise<void> {
     const form = (document.querySelector<HTMLInputElement>('input[name="form"]:checked')?.value ?? "plus") as AddressForm;
     const origin = originPattern(apiUrl);
     if (!origin) return status("The API address must start with https://", true);
-    // asked for here, on the click: Firefox grants host permissions only on request
-    if (!(await ext.permissions.request({ origins: [origin] }))) {
-      return status("The extension needs permission to reach the API to work.", true);
+    try {
+      // asked for here, on the click: Firefox grants host permissions only on request
+      if (!(await ext.permissions.request({ origins: [origin] }))) {
+        return status("The extension needs permission to reach the API to work.", true);
+      }
+      await saveConfig({ apiUrl, token, form });
+    } catch (err) {
+      return status(`Couldn't save settings: ${String((err as Error).message)}.`, true);
     }
-    await saveConfig({ apiUrl, token, form });
     try {
       const me = await new Api({ apiUrl, token }).me();
       status(`Saved. Signed in as ${me.user}; addresses end in @${me.archive_domain}.`);

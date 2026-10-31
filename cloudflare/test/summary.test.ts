@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { handleAdmin, type Authenticator } from "../src/admin/app";
 import { fromSummary, SUMMARY_KEY } from "../src/admin/summary";
 import { fakeEnv } from "./fakes";
+import processorSummary from "./fixtures/processor-summary";
 
 const allow: Authenticator = async () => ({ ok: true, email: "admin@example.org" });
 const get = (env: Parameters<typeof handleAdmin>[1], path: string) =>
@@ -35,6 +36,23 @@ function file(generatedAt: string) {
 }
 
 describe("fromSummary", () => {
+  it("reads processor-built aggregates with the same results as the legacy computation", () => {
+    const raw = JSON.stringify(processorSummary);
+    const doc = JSON.parse(raw);
+    const now = new Date(doc.generated_at);
+    const precomputed = fromSummary(raw, now);
+    const legacy = fromSummary(JSON.stringify({ ...doc, aggregates: undefined }), now);
+    expect(precomputed).toEqual(legacy);
+    expect(precomputed?.stats.tags.get("ann/news")?.last).toEqual(new Date("2026-10-26T08:00:00Z"));
+    expect(precomputed?.captures.lastCompleted).toEqual(new Date("2026-10-25T10:00:00Z"));
+    expect(precomputed?.captures.messages[0].capture).toBeNull();
+    expect(precomputed?.captures.messages[1].capture?.completedAt).toEqual(new Date("2026-10-25T10:00:00Z"));
+    // The legacy rows are not aggregated on requests with precomputed fields.
+    doc.incoming = [];
+    doc.statuses = [];
+    expect(fromSummary(JSON.stringify(doc), now)).toEqual(precomputed);
+  });
+
   it("rebuilds the stats and capture summary from the object", () => {
     const now = new Date("2026-10-27T12:00:00Z");
     const s = fromSummary(file("2026-10-27T11:58:00+00:00"), now);
@@ -61,6 +79,46 @@ describe("fromSummary", () => {
     expect(s?.captures.messages.find((m) => m.key === emlKey("2026-10-25", "a"))?.capture?.state).toBe("done");
   });
 
+  it.each([null, 7, "bad", {}, { key: 8 }, { key: emlKey("2026-10-25", "a"), customMetadata: null },
+    { key: emlKey("2026-10-25", "a"), customMetadata: ["ann"] },
+    { key: emlKey("2026-10-25", "a"), customMetadata: { envelope_from: 7 } },
+    { key: emlKey("2026-10-25", "a"), size: "large" },
+  ])("rejects malformed stored elements: %j", (element) => {
+    const now = new Date("2026-10-27T12:00:00Z");
+    const doc = JSON.parse(file(now.toISOString()));
+    doc.incoming.push(element);
+    expect(fromSummary(JSON.stringify(doc), now)).toBeNull();
+    doc.incoming.pop();
+    doc.statuses.push(element);
+    expect(fromSummary(JSON.stringify(doc), now)).toBeNull();
+  });
+
+  it("defaults malformed URL counts and dates", () => {
+    const now = new Date("2026-10-27T12:00:00Z");
+    const doc = JSON.parse(file(now.toISOString()));
+    doc.urls = { byKind: { page: { ok: { toString: 7 }, failed: -1 } }, wayback: "bad", lastUpdated: {} };
+    const s = fromSummary(JSON.stringify(doc), now);
+    expect(s?.captures.urls.total).toBe(0);
+    expect(s?.captures.urls.wayback).toBe(0);
+    expect(s?.captures.urls.lastUpdated).toBeNull();
+  });
+
+  it("ignores malformed aggregate elements and uses the legacy rows", () => {
+    const raw = JSON.stringify(processorSummary);
+    const now = new Date(processorSummary.generated_at);
+    const expected = fromSummary(raw, now);
+    const { stats, captures } = processorSummary.aggregates;
+    for (const aggregates of [
+      { stats: { ...stats, tags: { "ann/news": null } }, captures },
+      { stats: { ...stats, days: [...stats.days, null] }, captures },
+      { stats: { ...stats, senders: [...stats.senders, 7] }, captures },
+      { stats, captures: { ...captures, messages: [...captures.messages, null] } },
+      { stats, captures: { ...captures, messages: [{ ...captures.messages[0], capture: 7 }] } },
+    ]) {
+      expect(fromSummary(JSON.stringify({ ...processorSummary, aggregates }), now)).toEqual(expected);
+    }
+  });
+
   it("rejects junk and other versions", () => {
     const now = new Date();
     expect(fromSummary("not json", now)).toBeNull();
@@ -70,6 +128,18 @@ describe("fromSummary", () => {
 });
 
 describe("pages read the summary", () => {
+  it("falls back to live listings when summary members are malformed", async () => {
+    const f = fakeEnv();
+    await f.archive.put(SUMMARY_KEY, JSON.stringify({ version: 1, incoming: [null], statuses: [] }));
+    await f.archive.put(emlKey("2026-10-27", "c"), "x", { customMetadata: { user: "bob", tag: "" } });
+    for (const path of ["/", "/captures", "/storage"]) {
+      const response = await get(f.env, path);
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).toContain(path === "/storage" ? "Not counted yet" : "Counted from the bucket just now");
+    }
+  });
+
   it("uses the summary instead of listing, and says how old it is", async () => {
     const f = fakeEnv();
     const fresh = new Date(Date.now() - 3 * 60_000).toISOString();

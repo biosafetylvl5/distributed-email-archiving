@@ -1,5 +1,5 @@
-import { beforeAll, describe, expect, it } from "vitest";
-import { authenticate, verifyAccessJwt, type AccessKey, type KeyFetcher } from "../src/admin/auth";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { authenticate, fetchAccessKeys, verifyAccessJwt, type AccessKey, type KeyFetcher } from "../src/admin/auth";
 import { fakeEnv } from "./fakes";
 
 const TEAM = "myteam.cloudflareaccess.com";
@@ -101,6 +101,49 @@ describe("verifyAccessJwt", () => {
     expect(
       await verifyAccessJwt(token, { ...cfg, allowedEmails: ["admin@example.org"] }, keys, NOW),
     ).toMatchObject({ ok: true });
+  });
+});
+
+describe("Access key cache", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("throttles unknown kids, coalesces refreshes, and still permits rotation", async () => {
+    let now = NOW * 1000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ keys: [] })));
+    vi.stubGlobal("fetch", fetch);
+    const teamDomain = "access.example.org";
+    const config = { ...cfg, teamDomain };
+    const unknown = (kid: string) => `${b64urlJson({ alg: "RS256", kid })}.${b64urlJson({})}.`;
+    for (let i = 0; i < 5; i++) {
+      expect(await verifyAccessJwt(unknown(`missing-${i}`), config, fetchAccessKeys, NOW)).toEqual({ ok: false, reason: "unknown signing key" });
+    }
+    expect(fetch).toHaveBeenCalledTimes(1);
+    now += 30_000;
+    await Promise.all(Array.from({ length: 5 }, (_, i) => verifyAccessJwt(unknown(`other-${i}`), config, fetchAccessKeys, NOW)));
+    expect(fetch).toHaveBeenCalledTimes(2);
+    now += 30_000;
+    fetch.mockImplementation(async () => new Response(JSON.stringify({ keys: [publicJwk] })));
+    const token = await sign({ ...goodClaims(), iss: `https://${teamDomain}` });
+    expect(await verifyAccessJwt(token, config, fetchAccessKeys, NOW)).toMatchObject({ ok: true });
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("throttles failed certificate fetches too", async () => {
+    let now = NOW * 1000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const fetch = vi.fn().mockRejectedValue(new Error("unavailable"));
+    vi.stubGlobal("fetch", fetch);
+    for (let i = 0; i < 5; i++) {
+      await expect(fetchAccessKeys("failed-access.example.org", true)).rejects.toThrow("unavailable");
+    }
+    expect(fetch).toHaveBeenCalledTimes(1);
+    now += 30_000;
+    await expect(fetchAccessKeys("failed-access.example.org", true)).rejects.toThrow("unavailable");
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 });
 

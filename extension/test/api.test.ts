@@ -40,6 +40,33 @@ describe("Api", () => {
     expect(err.body.subscription.tag).toBe("ramen");
   });
 
+  it("drops credentials, query and fragment before lookup, create and update", async () => {
+    const calls = mockFetch([
+      [200, { exact: [], same_site: [] }],
+      [201, { subscription: sub("news") }],
+      [200, { subscription: sub("news") }],
+    ]);
+    const url = "https://reader%40example.com:SECRET@example.org/join?token=SECRET#SECRET";
+    await api().lookup(url);
+    await api().create({ signup_url: url });
+    await api().update("news", { signup_url: url }, null);
+    expect(new URL(calls[0].url).searchParams.get("url")).toBe("https://example.org/join");
+    for (const call of calls.slice(1)) {
+      expect(JSON.parse(call.init.body as string).signup_url).toBe("https://example.org/join");
+    }
+    expect(JSON.stringify(calls)).not.toMatch(/SECRET|reader/);
+  });
+
+  it("rejects invalid signup URLs locally while allowing URLs to be cleared", async () => {
+    const calls = mockFetch([[200, { subscription: sub("news") }]]);
+    await expect(api().create({ signup_url: "javascript:alert(1)" })).rejects.toMatchObject({ code: "invalid" });
+    await expect(api().update("news", { signup_url: "not a URL" }, null)).rejects.toMatchObject({ code: "invalid" });
+    await expect(api().lookup("not a URL")).rejects.toMatchObject({ code: "invalid" });
+    expect(calls).toHaveLength(0);
+    await api().update("news", { signup_url: null }, null);
+    expect(JSON.parse(calls[0].init.body as string).signup_url).toBeNull();
+  });
+
   it("needs configuring first", async () => {
     await expect(new Api({ apiUrl: "", token: "" }).me()).rejects.toMatchObject({ code: "not_configured" });
   });
@@ -100,8 +127,8 @@ describe("someone else's subscription for the site", () => {
 });
 
 describe("helpers", () => {
-  it("drops the fragment from sign-up links", () => {
-    expect(signupUrlOf("https://x.example.com/a?b=1#c")).toBe("https://x.example.com/a?b=1");
+  it("keeps only origin and path in sign-up links", () => {
+    expect(signupUrlOf("https://reader:SECRET@example.com/a?token=SECRET#SECRET")).toBe("https://example.com/a");
   });
 
   it("asks for https API origins only", () => {

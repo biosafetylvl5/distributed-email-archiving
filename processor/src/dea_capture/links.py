@@ -27,7 +27,7 @@ from .fetch import HostPacer
 from .guard import GuardedFetcher
 from .inventory import Inventory
 from .resolve import resolve
-from .store import Store, put_json
+from .store import Store, conditional_write_attempts, put_json
 
 # 1: first version
 LINKS_VERSION = 1
@@ -95,7 +95,10 @@ def process_links(
     records: list[LinkRecord] = []
     seen: set[str] = set()
     queued: dict[str, str] = {}
+    refused = inv.refused_urls()
     for link in inv.to_fetch():
+        if link.href in refused or link.canonical in refused:
+            continue
         if link.href in seen:
             continue
         seen.add(link.href)
@@ -154,6 +157,26 @@ class Relinked:
     out_of_time: bool = False
 
 
+def _merge_relinks(current: dict[str, Any], updated: dict[str, Any]) -> dict[str, Any]:
+    fresh = {r["href"]: r for r in current.get("links", [])}
+    links = []
+    newer = updated.get("relinked_at", "") >= current.get("relinked_at", "")
+    for rec in updated.get("links", []):
+        old = fresh.pop(rec["href"], None)
+        if old is not None and (
+            (old.get("canonical") and not rec.get("canonical"))
+            or (not newer and not (rec.get("canonical") and not old.get("canonical")))
+        ):
+            rec = old
+        links.append(rec)
+    return {
+        **current,
+        **updated,
+        "links": links + list(fresh.values()),
+        "relinked_at": max(current.get("relinked_at", ""), updated.get("relinked_at", "")),
+    }
+
+
 def retry_unresolved(
     sha: str, inv: Inventory, store: Store, resolver: GuardedFetcher, *, now: datetime,
     pacer: HostPacer, deadline: float | None = None,
@@ -170,7 +193,12 @@ def retry_unresolved(
     doc = load_links(store, sha)
     if doc is None:
         return None, got
-    by_href = {link.href: link for link in inv.to_fetch()}
+    refused = inv.refused_urls()
+    by_href = {
+        link.href: link
+        for link in inv.to_fetch()
+        if link.href not in refused and link.canonical not in refused
+    }
     queued = {str(r["h"]): str(r.get("queued")) for r in doc["links"] if r.get("h")}
     changed = False
     for i, old in enumerate(doc["links"]):
@@ -192,8 +220,16 @@ def retry_unresolved(
     if not changed:
         return None, got
     doc["relinked_at"] = _stamp(now)
-    put_json(store, captures_key(sha), doc)
-    return doc, got
+    # Fence the merge so a stale failure cannot overwrite a concurrent success.
+    key = captures_key(sha)
+    for _ in conditional_write_attempts(key):
+        current = store.get_with_etag(key)
+        merged = _merge_relinks(json.loads(current[0]) if current else {}, doc)
+        if put_json(
+            store, key, merged, if_match=current[1] if current else None, if_absent=current is None
+        ):
+            return merged, got
+    return None, got
 
 
 def load_links(store: Store, sha: str) -> dict[str, Any] | None:

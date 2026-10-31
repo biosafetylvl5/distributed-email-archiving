@@ -1,6 +1,7 @@
 // per-user API tokens, in the TOKENS KV namespace:
-//   t:<sha256 of the token>  -> {user, id, last_used_at?}   (looked up per request)
+//   t:<sha256 of the token>  -> {user, id}   (looked up per request)
 //   u:<user>/<id>            -> {hash, label, hint, created_at, created_by}
+//   used:<sha256>           -> last-use timestamp (never authorizes requests)
 // The token itself is never stored: it's shown once, when it's created. It's
 // 256 random bits, so a plain SHA-256 of it is as good as a slow hash.
 
@@ -14,7 +15,6 @@ export const LABEL_MAX = 100;
 interface TokenLookup {
   user: string;
   id: string;
-  last_used_at?: string;
 }
 
 interface TokenInfo {
@@ -76,9 +76,9 @@ export async function listTokens(env: Env, user: string): Promise<TokenEntry[]> 
     names.map(async (name) => {
       const info = await kv.get<TokenInfo>(name, "json");
       if (!info) return null;
-      const lookup = await kv.get<TokenLookup>(`t:${info.hash}`, "json");
+      const lastUsedAt = await kv.get(`used:${info.hash}`);
       const { hash: _, ...rest } = info;
-      return { ...rest, id: name.slice(name.lastIndexOf("/") + 1), lastUsedAt: lookup?.last_used_at ?? null };
+      return { ...rest, id: name.slice(name.lastIndexOf("/") + 1), lastUsedAt };
     }),
   );
   return entries.filter((e): e is TokenEntry => e !== null).sort((a, b) => a.created_at.localeCompare(b.created_at));
@@ -91,6 +91,7 @@ export async function revokeToken(env: Env, user: string, id: string): Promise<b
   if (!info) return false;
   await kv.delete(`t:${info.hash}`);
   await kv.delete(`u:${user}/${id}`);
+  await kv.delete(`used:${info.hash}`);
   return true;
 }
 
@@ -98,12 +99,14 @@ export async function revokeToken(env: Env, user: string, id: string): Promise<b
 // stay well inside KV's write limits)
 export async function tokenUser(env: Env, token: string, now = new Date()): Promise<TokenLookup | null> {
   if (!env.TOKENS || !TOKEN_RE.test(token)) return null;
-  const key = `t:${await sha256Hex(token)}`;
-  const found = await env.TOKENS.get<TokenLookup>(key, "json");
+  const hash = await sha256Hex(token);
+  const found = await env.TOKENS.get<TokenLookup>(`t:${hash}`, "json");
   if (!found) return null;
-  const today = now.toISOString().slice(0, 10);
-  if (found.last_used_at?.slice(0, 10) !== today) {
-    await env.TOKENS.put(key, JSON.stringify({ ...found, last_used_at: now.toISOString() }));
+  const usedKey = `used:${hash}`;
+  const lastUsedAt = await env.TOKENS.get(usedKey);
+  if (lastUsedAt?.slice(0, 10) !== now.toISOString().slice(0, 10)) {
+    // A stale request may recreate telemetry after revocation, but never authority.
+    await env.TOKENS.put(usedKey, now.toISOString());
   }
   return found;
 }

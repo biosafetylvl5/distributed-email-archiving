@@ -31,8 +31,18 @@ from typing import Any
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from . import __version__
-from .guard import ForbiddenFetch, IPNetwork, check_destination, check_link
-from .media import _TYPES, MediaOutcome, _describe, _last_error, _run, size_cap
+from .classify import canonicalize
+from .guard import FetchError, ForbiddenFetch, IPNetwork, check_destination, check_link
+from .media import (
+    _TYPES,
+    MediaOutcome,
+    _describe,
+    _last_error,
+    _run,
+    _size,
+    safe_metadata_url,
+    size_cap,
+)
 from .page import _become_subreaper
 from .proxy import GuardProxy, ProxyStats
 from .store import Store, put_json
@@ -73,8 +83,10 @@ def gallerydl_args(url: str, workdir: Path, proxy_port: int) -> list[str]:
         "--range", f"1-{MAX_FILES}", "--no-mtime", "--no-part",
         "--http-timeout", "60", "--retries", "3", "--sleep-request", "1",
         "-o", "cache.file=", "-o", "extractor.twitter.text-tweets=true",
-        # videos gallery-dl hands to yt-dlp are fetched by yt-dlp, never ffmpeg
-        "-o", 'downloader.ytdl.raw-options={"external_downloader": {"default": "native"}}',
+        # Keep ffmpeg's fallback and local postprocessing off the network.
+        "-o", 'downloader.ytdl.raw-options={"external_downloader": {"default": "native"},'
+        '"external_downloader_args": {"ffmpeg_i": ["-protocol_whitelist", "file,pipe,crypto"]},'
+        '"postprocessor_args": {"ffmpeg_i": ["-protocol_whitelist", "file,pipe,crypto"]}}',
         url,
     ]  # fmt: skip
 
@@ -89,10 +101,6 @@ def _load(path: Path) -> dict[str, Any] | None:
     except (OSError, ValueError):
         return None
     return got if isinstance(got, dict) else None
-
-
-def _size(folder: Path) -> int:
-    return sum(p.stat().st_size for p in folder.rglob("*") if p.is_file())
 
 
 def run_gallerydl(url: str, workdir: Path, proxy: GuardProxy, limit: int | None = None) -> Haul:
@@ -126,10 +134,13 @@ _SIGNED = re.compile(
 def scrub(value: Any) -> Any:
     """``value`` with signed URLs' query strings removed, all the way down."""
     if isinstance(value, dict):
-        return {k: scrub(v) for k, v in value.items()}
+        return {k: clean for k, v in value.items() if (clean := scrub(v)) is not None or v is None}
     if isinstance(value, list):
-        return [scrub(v) for v in value]
-    if isinstance(value, str) and value.startswith(("http://", "https://")) and "?" in value:
+        return [clean for v in value if (clean := scrub(v)) is not None or v is None]
+    if isinstance(value, str) and value.lower().startswith(("http://", "https://")):
+        value = safe_metadata_url(value)
+        if value is None:
+            return None
         parts = urlsplit(value)
         if any(_SIGNED.match(k) for k, _ in parse_qsl(parts.query, keep_blank_values=True)):
             return urlunsplit(parts._replace(query=""))
@@ -156,6 +167,8 @@ def collect(
         check_destination(canonical, extra_blocked=extra_blocked)
     except ForbiddenFetch as exc:
         return MediaOutcome("refused", str(exc))
+    except FetchError as exc:
+        return MediaOutcome("failed", str(exc))
     with tempfile.TemporaryDirectory(prefix="dea-gallery-") as tmp:
         h = collector(canonical, Path(tmp), limit)
         why = h.error or ("timed out" if h.exit_code is None else f"gallery-dl exit {h.exit_code}")
@@ -185,13 +198,13 @@ def store_gallery(
     for name, path in got.files.items():
         ctype = _TYPES.get(path.suffix.lower(), "application/octet-stream")
         store.put_file(folder + name, path, ctype)
-    put_json(store, folder + "info.json", got.info)
+    put_json(store, folder + "info.json", scrub(got.info))
     post = got.info.get("post", {})
     put_json(
         store,
         folder + "capture.json",
         {
-            "canonical": canonical,
+            "canonical": canonicalize(canonical),
             "via": "gallery-dl",
             "site": post.get("category"),
             **got.details,

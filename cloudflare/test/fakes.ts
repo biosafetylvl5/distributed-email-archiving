@@ -69,6 +69,7 @@ function body(o: FakeObject, bytes: Uint8Array) {
 
 export class FakeR2 {
   objects = new Map<string, FakeObject>();
+  pageSize = 1000;
 
   async put(
     key: string,
@@ -96,20 +97,31 @@ export class FakeR2 {
     this.objects.delete(key);
   }
 
-  async list(opts: { prefix?: string; delimiter?: string; cursor?: string } = {}) {
+  async list(opts: {
+    prefix?: string; delimiter?: string; cursor?: string; limit?: number; include?: string[];
+  } = {}) {
     const prefix = opts.prefix ?? "";
     const keys = [...this.objects.keys()].filter((k) => k.startsWith(prefix)).sort();
-    if (opts.delimiter) {
-      const prefixes = new Set<string>();
-      const objects = [];
-      for (const k of keys) {
-        const i = k.indexOf(opts.delimiter, prefix.length);
-        if (i >= 0) prefixes.add(k.slice(0, i + 1));
-        else objects.push(this.objects.get(k)!);
-      }
-      return { objects, delimitedPrefixes: [...prefixes], truncated: false };
+    const entries = new Map<string, FakeObject | null>();
+    for (const key of keys) {
+      const i = opts.delimiter ? key.indexOf(opts.delimiter, prefix.length) : -1;
+      if (i >= 0) entries.set(key.slice(0, i + opts.delimiter!.length), null);
+      else entries.set(key, this.objects.get(key)!);
     }
-    return { objects: keys.map((k) => this.objects.get(k)!), delimitedPrefixes: [], truncated: false };
+    const start = opts.cursor ? Number(opts.cursor) : 0;
+    const limit = Math.min(opts.limit ?? this.pageSize, this.pageSize);
+    const page = [...entries].slice(start, start + limit);
+    const truncated = start + limit < entries.size;
+    return {
+      objects: page.flatMap(([, o]) => o ? [{
+        key: o.key, size: o.size, uploaded: o.uploaded,
+        customMetadata: opts.include?.includes("customMetadata") ? o.customMetadata : undefined,
+        httpMetadata: opts.include?.includes("httpMetadata") ? o.httpMetadata : undefined,
+      }] : []),
+      delimitedPrefixes: page.filter(([, o]) => !o).map(([key]) => key),
+      truncated,
+      cursor: truncated ? String(start + limit) : undefined,
+    };
   }
 }
 

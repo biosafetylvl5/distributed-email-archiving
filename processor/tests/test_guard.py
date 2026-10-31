@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import ipaddress
+import socket
 
 import pytest
 
 from dea_capture.guard import (
+    FetchError,
     ForbiddenFetch,
     GuardedFetcher,
     check_destination,
@@ -73,12 +75,32 @@ def test_names_are_resolved_not_parsed() -> None:
         check_destination("http://2130706433/", resolver_for("127.0.0.1"))
 
 
-def test_resolution_failure_refuses() -> None:
+@pytest.mark.parametrize("code", [socket.EAI_AGAIN, socket.EAI_NONAME])
+def test_resolution_failure_is_retryable(code: int) -> None:
     def broken(host: str, port: int) -> list[str]:
-        raise OSError("nxdomain")
+        raise socket.gaierror(code, "DNS failed")
 
-    with pytest.raises(ForbiddenFetch, match="cannot resolve"):
+    with pytest.raises(FetchError, match="cannot resolve"):
         check_destination("https://gone.example.com/", broken)
+
+
+def test_empty_dns_answer_is_retryable() -> None:
+    with pytest.raises(FetchError, match="no addresses"):
+        check_destination("https://example.org/", resolver_for())
+
+
+def test_invalid_hostname_is_a_safety_refusal() -> None:
+    def invalid(host: str, port: int) -> list[str]:
+        raise UnicodeError("bad name")
+
+    with pytest.raises(ForbiddenFetch, match="invalid host"):
+        check_destination("https://example.org/", invalid)
+
+
+def test_refusal_reason_does_not_expose_parameter_value() -> None:
+    with pytest.raises(ForbiddenFetch) as exc:
+        check_link("https://example.org/do?action=confirm_SECRET_reader%40example.com")
+    assert str(exc.value) == "action: parameter 'action'"
 
 
 def test_returns_checked_addresses_for_pinning() -> None:
@@ -95,6 +117,9 @@ def test_returns_checked_addresses_for_pinning() -> None:
         "https://substack.com/app-link/post?post_id=1&token=t",
         "mailto:a@example.org",
         "#top",
+        "https://example.org/news/reader%40example.com",
+        "https://example.org:bad/article",
+        "https://example.org/?return=https%3A%2F%2Fexample.org%2Freader%40example.com",
     ],
 )
 def test_check_link_refuses(url: str) -> None:

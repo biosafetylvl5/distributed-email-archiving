@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import email
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from email import policy
-from email.message import EmailMessage
+from email.message import EmailMessage, MIMEPart
 from urllib.parse import urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
@@ -90,17 +90,27 @@ def parse_list_unsubscribe(value: str | None) -> tuple[str, ...]:
     return tuple(m.strip() for m in re.findall(r"<([^>]+)>", value))
 
 
+def _cid_leaves(msg: MIMEPart) -> Iterator[MIMEPart]:
+    if msg.get_content_type() == "message/rfc822":
+        return
+    if msg.is_multipart():
+        for part in msg.iter_parts():
+            yield from _cid_leaves(part)
+    else:
+        yield msg
+
+
 def parse(raw: bytes) -> Message:
     msg = email.message_from_bytes(raw, policy=policy.default)
     assert isinstance(msg, EmailMessage)
     cid_parts: dict[str, CidPart] = {}
-    for part in msg.walk():
-        if part.is_multipart():
-            continue
+    for part in _cid_leaves(msg):
         cid = part.get("Content-ID")
         if not cid:
             continue
         cid = str(cid).strip().strip("<>")
+        if cid in cid_parts:
+            continue
         payload = part.get_payload(decode=True)
         cid_parts[cid] = CidPart(
             cid=cid,

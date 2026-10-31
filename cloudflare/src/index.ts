@@ -13,6 +13,7 @@
 // fetch() serves the admin dashboard (src/admin/) and, on its own hostname, the
 // subscription API (src/api/); never on the mail path
 
+import { archiveDomain } from "./addresses";
 import { handleAdmin } from "./admin/app";
 import { handleApi } from "./api/app";
 import type { Env } from "./env";
@@ -33,16 +34,12 @@ async function sha256Hex(buf: ArrayBuffer): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// Approximate daily counter
-// KV is eventually consistent
-// so a burst can overshoot the cap slightly
-async function underDailyCap(kv: KVNamespace, scope: string, cap: number): Promise<boolean> {
-  const day = new Date().toISOString().slice(0, 10);
+// Approximate attempted-delivery counters: KV reads/writes are not atomic and
+// are eventually consistent. Concurrent bursts can undercount without a bound.
+async function dailyCount(kv: KVNamespace, scope: string, day: string) {
   const key = `rl:${scope}:${day}`;
   const current = parseInt((await kv.get(key)) ?? "0", 10) || 0;
-  if (current >= cap) return false;
-  await kv.put(key, String(current + 1), { expirationTtl: 2 * 24 * 3600 });
-  return true;
+  return { key, current };
 }
 
 const handler = {
@@ -51,13 +48,11 @@ const handler = {
     // Cloudflare has no per-subdomain catch-all
     // so apex or other-subdomain mail can arrive here too
     // reject anything not addressed to ARCHIVE_DOMAIN
-    // When ARCHIVE_DOMAIN is unset this check is skipped (accept any domain)
-    if (env.ARCHIVE_DOMAIN) {
-      const domain = recipientDomain(message.to);
-      if (domain !== env.ARCHIVE_DOMAIN.trim().toLowerCase()) {
-        message.setReject("no such recipient");
-        return;
-      }
+    const domain = archiveDomain(env);
+    if (!domain) throw new Error("ARCHIVE_DOMAIN is required; transient configuration failure");
+    if (recipientDomain(message.to) !== domain) {
+      message.setReject("no such recipient");
+      return;
     }
 
     const rec = parseRecipient(message.to);
@@ -92,29 +87,33 @@ const handler = {
       message.setReject(decision.reason);
       return;
     }
-    if (decision.action === "defer") {
-      throw new Error(decision.reason); // transient -> sender retries
-    }
 
     // Rate limits
     // DEFER (throw) rather than reject
     // senders retry once the daily window resets
-    if (!(await underDailyCap(env.RATELIMIT, "global", settings.global_daily_cap))) {
-      throw new Error("over global daily cap; transient, senders retry");
-    }
     const scope = decision.tag
       ? `tag:${decision.user}/${decision.tag}`
       : `untagged:${decision.user}`;
     const cap = decision.tag ? settings.tag_daily_cap : settings.untagged_daily_cap;
-    if (!(await underDailyCap(env.RATELIMIT, scope, cap))) {
+    const day = new Date().toISOString().slice(0, 10);
+    const [global, recipient] = await Promise.all([
+      dailyCount(env.RATELIMIT, "global", day),
+      dailyCount(env.RATELIMIT, scope, day),
+    ]);
+    if (global.current >= settings.global_daily_cap) {
+      throw new Error("over global daily cap; transient, senders retry");
+    }
+    if (recipient.current >= cap) {
       throw new Error("over recipient daily cap; transient, senders retry");
     }
+    await Promise.all([global, recipient].map(({ key, current }) =>
+      env.RATELIMIT.put(key, String(current + 1), { expirationTtl: 2 * 24 * 3600 }),
+    ));
 
     // Newsletters are small; hopefully....
     // content-addressed key makes sender retries idempotent
     const raw = await new Response(message.raw).arrayBuffer();
     const id = await sha256Hex(raw);
-    const day = new Date().toISOString().slice(0, 10);
     const key = `incoming/${decision.disposition}/${day}/${id}.eml`;
 
     await env.ARCHIVE.put(key, raw, {

@@ -38,7 +38,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from . import __version__
-from .guard import ForbiddenFetch, IPNetwork, check_destination, check_link
+from .classify import canonicalize
+from .guard import FetchError, ForbiddenFetch, IPNetwork, check_destination, check_link
 from .proxy import GuardProxy, ProxyStats
 from .store import Store, put_json
 
@@ -194,8 +195,9 @@ def run_crawler(url: str, workdir: Path, proxy: GuardProxy) -> Crawl:
                 code: int | None = proc.wait(KILL_AFTER)
             except subprocess.TimeoutExpired:
                 code = None
-            # the crawler leaves its redis and browser running when it exits
-            _end_group(proc.pid)
+            finally:
+                # the crawler leaves its redis and browser running when it exits
+                _end_group(proc.pid)
     finally:
         proxy.stop()
     wacz = workdir / "collections" / COLLECTION / f"{COLLECTION}.wacz"
@@ -296,6 +298,8 @@ def crawl_page(
         check_destination(canonical, extra_blocked=extra_blocked)
     except ForbiddenFetch as exc:
         return PageOutcome("refused", error=str(exc))
+    except FetchError as exc:
+        return PageOutcome("failed", error=str(exc))
     with tempfile.TemporaryDirectory(prefix="dea-page-") as tmp:
         c = crawler(canonical, Path(tmp))
         host = (urlsplit(canonical).hostname or "").lower()
@@ -344,9 +348,9 @@ def store_page(
         store,
         folder + "capture.json",
         {
-            "canonical": canonical,
+            "canonical": canonicalize(canonical),
             "via": via,
-            **({"snapshot": snapshot} if snapshot else {}),
+            **({"snapshot": canonicalize(snapshot)} if snapshot else {}),
             "http_status": got.http_status,
             **got.info,
             "files": {name: _file(data) for name, data in got.files.items()},

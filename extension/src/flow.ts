@@ -1,5 +1,6 @@
 // steps shared by the popup and the context menu
 
+import { normalizeSignupUrl } from "../../cloudflare/src/tagfields";
 import { Api, type Lookup, type Other, type Subscription } from "./api";
 import type { AddressForm } from "./config";
 import { ext } from "./ext";
@@ -31,11 +32,9 @@ export async function fillInto(tabId: number, frameId: number | undefined, addre
   return res?.result === true;
 }
 
-// the page without its fragment: what's kept as the sign-up link
+// the public page, without credentials, query or fragment
 export function signupUrlOf(url: string): string {
-  const u = new URL(url);
-  u.hash = "";
-  return u.toString();
+  return normalizeSignupUrl(url) ?? "";
 }
 
 // the user's subscription for this page: one signed up on this very page,

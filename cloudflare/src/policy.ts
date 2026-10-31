@@ -49,7 +49,6 @@ export interface TagRecord {
 // supplies those. KEEP IN PARITY with processor/src/processor/policy.py.
 export type Decision =
   | { action: "reject"; reason: string } // permanent SMTP reject (setReject)
-  | { action: "defer"; reason: string } // transient failure (throw) -> sender retries
   | { action: "accept"; disposition: Disposition; user: string; tag: string | null };
 
 // user: starts alnum, then alnum/dot/hyphen (no underscore, so "__" is an
@@ -62,11 +61,15 @@ const TAG_RE = new RegExp(`^${TAG_PART}$`);
 
 // for admin input: names that parseRecipient could ever produce
 export function isValidUser(name: string): boolean {
-  return USER_RE.test(name);
+  return USER_RE.exec(name)?.[0] === name && !name.includes("..") && !name.endsWith(".");
 }
 
-export function isValidTag(name: string): boolean {
-  return TAG_RE.test(name);
+export function isValidTag(name: string, user?: string): boolean {
+  // reserve two bytes for "__" so both address forms fit SMTP's 64-byte limit
+  return (
+    TAG_RE.exec(name)?.[0] === name && !name.includes("..") && !name.endsWith(".") &&
+    (user === undefined || (isValidUser(user) && user.length + 2 + name.length <= 64))
+  );
 }
 
 export function parseRecipient(address: string): ParsedRecipient | null {
@@ -74,7 +77,7 @@ export function parseRecipient(address: string): ParsedRecipient | null {
   if (at <= 0) return null;
   const local = address.slice(0, at).trim().toLowerCase();
   const m = LOCAL_RE.exec(local);
-  if (!m) return null;
+  if (!m || !isValidUser(m[1]) || (m[3] && !isValidTag(m[3], m[1]))) return null;
   return {
     user: m[1],
     tag: m[3] ?? null,
@@ -83,9 +86,7 @@ export function parseRecipient(address: string): ParsedRecipient | null {
 }
 
 export function envelopeFromDomain(envelopeFrom: string): string | null {
-  const at = envelopeFrom.lastIndexOf("@");
-  if (at <= 0) return null;
-  return envelopeFrom.slice(at + 1).trim().toLowerCase() || null;
+  return recipientDomain(envelopeFrom);
 }
 
 // Recipient domain (the part after @), lowercased. The ingest Worker checks
@@ -128,8 +129,7 @@ export function decide(args: {
     }
     if (
       tagRecord.sender_domain &&
-      args.envelopeFromDomain &&
-      tagRecord.sender_domain !== args.envelopeFromDomain
+      tagRecord.sender_domain.trim().toLowerCase() !== args.envelopeFromDomain
     ) {
       return { action: "accept", disposition: "quarantine", user: rec.user, tag: rec.tag };
     }

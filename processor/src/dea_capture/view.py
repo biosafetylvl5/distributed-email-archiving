@@ -21,8 +21,10 @@ own origin, so a rewrite missed here still loads nothing.
 
 from __future__ import annotations
 
+import hashlib
 import html as htmllib
 import json
+import re
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -32,12 +34,12 @@ from typing import Any
 
 from bs4 import BeautifulSoup, Comment, Tag
 
-from .classify import Classified, Decision, LinkClass, tracking_vendor
-from .extract import parse, parse_srcset, rewrite_css
+from .classify import Classified, Decision, LinkClass, canonicalize, tracking_vendor
+from .extract import TEXT_URL_RE, parse, parse_srcset, rewrite_css
 from .inventory import inventory
 from .store import Store, put_json
 
-VIEW_VERSION = 2
+VIEW_VERSION = 3
 _STYLESHEETS = ("stylesheet", "css-import")
 # removed with their content
 _DROP = ["script", "iframe", "frame", "frameset", "object", "embed", "applet", "base", "meta",
@@ -73,6 +75,23 @@ class View:
 
 def _name(key: str) -> str:
     return key.rsplit("/", 1)[1]
+
+
+def _css_name(a: dict[str, Any]) -> str:
+    base = a["chain"][-1] if a.get("chain") else a["url"]
+    return hashlib.sha256(f"{a['key']}\n{base}".encode()).hexdigest() + ".css"
+
+
+def _safe_text(text: str) -> str:
+    def rewrite(m: re.Match[str]) -> str:
+        url = m.group(0).rstrip(".,;:!?")
+        suffix = m.group(0)[len(url) :]
+        try:
+            return ("[tracking URL]" if tracking_vendor(url) else canonicalize(url)) + suffix
+        except ValueError:
+            return "[invalid URL]" + suffix
+
+    return TEXT_URL_RE.sub(rewrite, text)
 
 
 def _attr(el: Tag, name: str) -> str:
@@ -124,7 +143,7 @@ class _Rewriter:
                 self.removed["pixels" if url.strip() in self.pixels else "unstored"] += 1
             return None
         if a.get("via") in _STYLESHEETS:
-            return _name(a["key"]) if from_css else f"css/{_name(a['key'])}"
+            return _css_name(a) if from_css else f"css/{_css_name(a)}"
         return f"../assets/{_name(a['key'])}" if from_css else f"assets/{_name(a['key'])}"
 
     def css_to(self, *, from_css: bool) -> Callable[[str | None, bool], str]:
@@ -142,7 +161,7 @@ class _Rewriter:
             css = rewrite_css(
                 body.decode("utf-8", errors="replace"), base, self.css_to(from_css=True)
             )
-            out[_name(a["key"])] = css.encode()
+            out[_css_name(a)] = css.encode()
         return out
 
 
@@ -175,7 +194,7 @@ def _rewrite_embeds(soup: BeautifulSoup, rw: _Rewriter) -> None:
             urls = parse_srcset(value)
             targets = [rw.target(u, from_css=False) for u in urls]
             if urls and all(targets):
-                for u, t in zip(urls, targets, strict=True):
+                for u, t in sorted(zip(urls, targets, strict=True), key=lambda pair: -len(pair[0])):
                     value = value.replace(u, t or "")
                 el["srcset"] = value
             else:
@@ -245,7 +264,7 @@ def render(raw: bytes, store: Store, manifest: dict[str, Any], captures: dict[st
     else:
         body = (
             '<pre style="white-space:pre-wrap;font:14px/1.45 ui-monospace,monospace">'
-            f"{htmllib.escape(msg.text or '')}</pre>"
+            f"{htmllib.escape(_safe_text(msg.text or ''))}</pre>"
         )
     doc = '<!doctype html>\n<meta charset="utf-8">\n' + body
     counts.update(rw.removed)
@@ -256,7 +275,7 @@ def render(raw: bytes, store: Store, manifest: dict[str, Any], captures: dict[st
         "source": str(manifest.get("source", "")),
         "headers": {
             h.lower(): _header(msg.message, h)
-            for h in ("Subject", "From", "To", "Date", "List-Id")
+            for h in ("Subject", "From", "Date", "List-Id")
             if msg.message.get(h)
         },
         "body": "html" if msg.html else "text",

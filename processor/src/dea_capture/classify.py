@@ -25,6 +25,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
+from itertools import pairwise
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 
@@ -85,6 +86,11 @@ MAILCHIMP_PARAMS = frozenset({"e"})
 _MAILCHIMP_HOSTS = re.compile(r"(^|\.)(list-manage\.com|mailchi\.mp|forward-to-friend\.com)$")
 
 
+def normalized_host(url: str) -> str:
+    """One spelling for DNS hosts, including absolute names with a trailing dot."""
+    return (urlsplit(url).hostname or "").removesuffix(".").lower()
+
+
 def _is_substack(host: str, keys: Iterable[str]) -> bool:
     return (
         host == "substack.com"
@@ -108,20 +114,40 @@ def query_keys(url: str) -> set[str]:
     return {k.lower() for k, _ in parse_qsl(urlsplit(url).query, keep_blank_values=True)}
 
 
-# a parameter value that is an email address names the reader as surely as a
-# token does (Substack's signup links carry ``freeSignupEmail=<address>``)
-# (the local part may hold spaces: a "+" in an address decodes to one)
-_EMAIL_VALUE = re.compile(r"^[^@/?#]+@[^@\s/?#]+\.[a-z]{2,}$", re.IGNORECASE)
+# mailboxes can be nested inside a return URL or percent-encoded more than once
+_EMAIL_VALUE = re.compile(r"^[^\s@/?#&=]+@[^@\s/?#&=]+\.[a-z]{2,}", re.IGNORECASE)
+_ENCODED = re.compile(r"%[0-9a-f]{2}", re.IGNORECASE)
 
 
-def _is_email(value: str) -> bool:
-    return bool(_EMAIL_VALUE.match(value.strip()))
+def _contains_email(value: str) -> bool:
+    for passes in range(4):
+        # Check each token once, not every possible starting position in a long path.
+        if "@" in value and any(
+            _EMAIL_VALUE.match(f"{local}@{domain}")
+            for token in re.split(r"[\s/?#&=]", value)
+            for local, domain in pairwise(token.split("@"))
+        ):
+            return True
+        if passes == 3:
+            # More encoding could conceal a mailbox: refuse rather than decode without a bound.
+            return bool(_ENCODED.search(value))
+        decoded = unquote(value)
+        if decoded == value:
+            return False
+        value = decoded
+    return False
+
+
+def has_email_path(url: str) -> bool:
+    return _contains_email(urlsplit(url).path)
 
 
 def has_auth_param(url: str) -> bool:
     """True when ``url`` carries an auth parameter or an email address."""
     pairs = parse_qsl(urlsplit(url).query, keep_blank_values=True)
-    return any(k.lower() in AUTH_PARAMS or _is_email(v) for k, v in pairs)
+    return has_email_path(url) or any(
+        k.lower() in AUTH_PARAMS or _contains_email(v) for k, v in pairs
+    )
 
 
 # ── canonicalization ────────────────────────────────────────────────────────
@@ -131,13 +157,16 @@ _OPEN_SUBSTACK = re.compile(r"^/pub/([a-z0-9-]+)/p/([^/]+)/?$", re.IGNORECASE)
 
 def canonicalize(url: str) -> str:
     """The dedupe key for a web URL: tracking and auth parameters, and any
-    parameter whose value is an email address, removed,
-    scheme and host lowercased, default port, fragment and any credentials
+    parameter whose decoded value contains an email address, removed.
+    Mailbox-bearing paths have no safe canonical and raise ValueError.
+    Scheme and host are lowercased, default port, fragment and credentials
     dropped, and known publisher aliases rewritten. Parameter order is
     otherwise preserved."""
     parts = urlsplit(url.strip())
+    if has_email_path(url):
+        raise ValueError("email address in URL path")
     scheme = parts.scheme.lower()
-    host = (parts.hostname or "").lower()
+    host = normalized_host(url)
     port = parts.port
     bracketed = f"[{host}]" if ":" in host else host
     netloc = (
@@ -148,7 +177,9 @@ def canonicalize(url: str) -> str:
     pairs = parse_qsl(parts.query, keep_blank_values=True)
     substack = _is_substack(host, (k.lower() for k, _ in pairs))
     mailchimp = bool(_MAILCHIMP_HOSTS.search(host))
-    kept = [(k, v) for k, v in pairs if not _strip(k, substack, mailchimp) and not _is_email(v)]
+    kept = [
+        (k, v) for k, v in pairs if not _strip(k, substack, mailchimp) and not _contains_email(v)
+    ]
     path = parts.path or "/"
     if host == "open.substack.com" and (m := _OPEN_SUBSTACK.match(path)):
         netloc, path = f"{m.group(1).lower()}.substack.com", f"/p/{m.group(2)}"
@@ -195,7 +226,7 @@ def _b64url_json(segment: str) -> object:
 
 def tracking_vendor(url: str) -> str | None:
     parts = urlsplit(url)
-    host = (parts.hostname or "").lower()
+    host = normalized_host(url)
     for r in _REDIRECTS:
         if r.host.search(host) and r.path.search(parts.path):
             return r.vendor
@@ -210,7 +241,7 @@ def decode_redirect(url: str) -> str | None:
     and deduplicate, never as proof of where the redirect goes.
     """
     parts = urlsplit(url)
-    host = (parts.hostname or "").lower()
+    host = normalized_host(url)
     if host == "substack.com" or host.endswith(".substack.com"):
         m = _SUBSTACK_V2.match(parts.path)
         if m:
@@ -255,7 +286,11 @@ _SHORT_TEXT_WORDS = 6
 
 
 def _unsubscribe_reason(url: str) -> str | None:
-    if _UNSUB_URL.search(unquote(url)):
+    parts = urlsplit(url)
+    normalized = urlunsplit(
+        (parts.scheme, normalized_host(url), parts.path, parts.query, parts.fragment)
+    )
+    if _UNSUB_URL.search(unquote(normalized)):
         return "url looks like unsubscribe or preferences"
     return None
 
@@ -265,7 +300,7 @@ def _action_reason(url: str) -> str | None:
     segments = {s.lower() for s in unquote(parts.path).split("/") if s}
     if hit := sorted(segments & _ACTION_SEGMENTS):
         return f"path segment '{hit[0]}'"
-    host = (parts.hostname or "").lower()
+    host = normalized_host(url)
     pairs = [(k.lower(), v) for k, v in parse_qsl(parts.query, keep_blank_values=True)]
     if hit := sorted({k for k, _ in pairs} & _ACTION_PARAMS):
         return f"parameter '{hit[0]}'"
@@ -273,7 +308,7 @@ def _action_reason(url: str) -> str | None:
     for k, v in pairs:
         # Substack's action=share etc. is UI state, stripped by canonicalize
         if k in {"act", "action"} and not substack and _ACTION_VALUES.match(v):
-            return f"parameter {k}={v}"
+            return f"parameter '{k}'"
     return None
 
 
@@ -303,17 +338,28 @@ def classify(href: str, text: str = "", unsubscribe_urls: Iterable[str] = ()) ->
     ``List-Unsubscribe`` URIs, which are never fetched whatever they look like."""
     href = href.strip()
     text = " ".join(text.split())
+    try:
+        return _classify(href, text, unsubscribe_urls)
+    except ValueError:
+        return _skip(href, text, LinkClass.NON_WEB, "invalid URL")
+
+
+def _classify(href: str, text: str, unsubscribe_urls: Iterable[str]) -> Classified:
     if href.startswith("#"):
         return _skip(href, text, LinkClass.INTERNAL_ANCHOR, "fragment within the message")
     scheme = urlsplit(href).scheme.lower()
     if scheme not in {"http", "https"}:
         return _skip(href, text, LinkClass.NON_WEB, f"scheme '{scheme or 'none'}'")
-    if not urlsplit(href).hostname:
+    parts = urlsplit(href)
+    if not parts.hostname:
         return _skip(href, text, LinkClass.NON_WEB, "no host")
+    _ = parts.port  # validate even opaque redirects before deciding to resolve
     if href in set(unsubscribe_urls):
         return _skip(href, text, LinkClass.UNSUBSCRIBE, "List-Unsubscribe header")
 
     decoded = decode_redirect(href)
+    if has_email_path(href) or (decoded and has_email_path(decoded)):
+        return _skip(href, text, LinkClass.LOGIN_TOKEN, "email address in URL path", decoded)
     if hit := _state_change(href, text):
         return _skip(href, text, hit[0], hit[1], decoded)
     if decoded and (hit := _state_change(decoded, "")):

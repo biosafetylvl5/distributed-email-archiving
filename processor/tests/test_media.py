@@ -11,7 +11,15 @@ from typing import Any
 import pytest
 
 from dea_capture import guard, media
-from dea_capture.capture import CaptureRecord, due_key, index_key, queue, run, url_hash
+from dea_capture.capture import (
+    CaptureRecord,
+    due_key,
+    index_key,
+    parse_due_key,
+    queue,
+    run,
+    url_hash,
+)
 from dea_capture.guard import GuardedFetcher
 from dea_capture.media import (
     Grab,
@@ -50,6 +58,22 @@ def offline_guard(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ── deciding from the probe ─────────────────────────────────────────────────
+
+
+def test_seed_dns_failure_is_retryable(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(host: str, port: int) -> list[str]:
+        raise OSError("DNS unavailable")
+
+    def check(url: str, **kwargs: Any) -> object:
+        return guard.check_destination(url, broken)
+
+    def never(url: str, path: Path, limit: int | None) -> Grab:
+        pytest.fail("grabber started after failed DNS")
+
+    monkeypatch.setattr(media, "check_destination", check)
+    got = grab_media("https://example.org/video", never, lambda g: pytest.fail("kept"))
+    assert got.outcome == "failed"
+    assert got.error == "cannot resolve example.org"
 
 
 def test_estimated_bytes() -> None:
@@ -160,6 +184,9 @@ if "-J" in args:
         sys.exit(1)
     print(os.environ["FAKE_YTDLP_INFO"])
     sys.exit(0)
+if os.environ.get("FAKE_YTDLP_OVERSIZE"):
+    print("[download] File is larger than max-filesize (11 bytes > 10 bytes). Aborting.")
+    sys.exit(0)
 if os.environ.get("FAKE_YTDLP_HANG"):
     time.sleep(60)
 leftover = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
@@ -263,7 +290,8 @@ def test_run_media_sends_a_channel_to_the_page_stage(tmp_path: Path) -> None:
     result = run(store, key, _guarded(), now=T0, media_grabber=_grabber(grab))
     assert result.outcome == "rerouted"
     rec = CaptureRecord.load(store.get(index_key(url_hash(URL))) or b"")
-    assert (rec.kind, rec.status, rec.due) == ("page", "queued", due_key("page", T0, rec.h))
+    assert (rec.kind, rec.status) == ("page", "queued")
+    assert rec.due is not None and parse_due_key(rec.due) == ("page", T0, rec.h)
 
 
 def test_run_media_defers_and_retries(tmp_path: Path) -> None:
@@ -287,3 +315,155 @@ def test_store_media_streams_files(tmp_path: Path) -> None:
         "bytes": 4,
         "sha256": hashlib.sha256(b"webm").hexdigest(),
     }
+
+
+def test_media_limit_counts_thumbnail_before_keep() -> None:
+    got = grab_media(
+        URL,
+        fake_grabber(make=["media.mp4", "thumbnail.jpg"]),
+        lambda g: pytest.fail("kept"),
+        limit=15,
+    )
+    assert (got.outcome, got.limited) == ("deferred", True)
+
+
+def test_media_metadata_canonicalizes_all_url_values() -> None:
+    info = {
+        **INFO,
+        "webpage_url": "https://example.org/post?mc_eid=SECRET",
+        "uploader_url": "HTTPS://example.org/author?auth_token=SECRET",
+        "chapters": [{"url": "https://example.org/chapter?utm_source=SECRET"}],
+    }
+    got = grab_media(URL, fake_grabber(info=info, make=["media.mp4"]), lambda g: None)
+    assert got.outcome == "ok" and "SECRET" not in json.dumps(got.info)
+
+
+@pytest.mark.parametrize("stop_reason", ["growth", "reported"])
+def test_ytdlp_download_size_abort_is_deferred(
+    fake_ytdlp: Path, monkeypatch: pytest.MonkeyPatch, stop_reason: str
+) -> None:
+    def run_download(
+        args: list[str],
+        workdir: Path,
+        log: str,
+        timeout: float,
+        stdout: Path | None,
+        stop: Any = None,
+    ) -> int | None:
+        if "-J" in args:
+            assert stdout is not None
+            stdout.write_text(json.dumps({"id": "x"}))
+            return 0
+        assert stop is not None and stdout is not None
+        if stop_reason == "growth":
+            out = workdir / "out"
+            out.mkdir()
+            (out / "media.mp4.part").write_bytes(b"x" * 21)
+            assert stop()
+            return None
+        stdout.write_text(
+            "[download] File is larger than max-filesize (11 bytes > 10 bytes). Aborting."
+        )
+        return 1
+
+    monkeypatch.setattr(media, "_run", run_download)
+    got = media.run_ytdlp(URL, fake_ytdlp, GuardProxy(verify=None), limit=10)
+    assert got.verdict is not None and got.verdict[0] == "deferred"
+    judged = grab_media(URL, lambda u, p, limit: got, lambda g: pytest.fail("kept"), limit=10)
+    assert (judged.outcome, judged.limited) == ("deferred", True)
+
+
+@pytest.mark.parametrize("failure", ["wait", "stop"])
+def test_downloader_terminates_group_on_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    import subprocess
+
+    ended: list[int] = []
+
+    class Process:
+        pid = 123
+
+        def wait(self, timeout: float) -> int:
+            if failure == "wait":
+                raise KeyboardInterrupt
+            raise subprocess.TimeoutExpired("downloader", timeout)
+
+    def stop() -> bool:
+        raise OSError("growth monitor failed")
+
+    monkeypatch.setattr("dea_capture.media.subprocess.Popen", lambda *a, **kw: Process())
+    monkeypatch.setattr(media, "_end_group", ended.append)
+    with pytest.raises(KeyboardInterrupt if failure == "wait" else OSError):
+        media._run(["unused"], tmp_path, "log", 10, None, stop)
+    assert ended == [123]
+
+
+@pytest.mark.parametrize("adapter", ["media", "gallery"])
+def test_ffmpeg_manifest_fallback_cannot_fetch_network(tmp_path: Path, adapter: str) -> None:
+    import shutil
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from dea_capture.gallery import gallerydl_args
+
+    yt_dlp = pytest.importorskip("yt_dlp")
+    hls = pytest.importorskip("yt_dlp.downloader.hls")
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg is not installed")
+    requests: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            requests.append(self.path)
+            self.send_error(403)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        if adapter == "media":
+            args = ytdlp_args(URL, tmp_path, 1, probe=False)[3:]
+            options = yt_dlp.parse_options(args).ydl_opts
+        else:
+            args = gallerydl_args(URL, tmp_path, 1)
+            raw = next(a for a in args if a.startswith("downloader.ytdl.raw-options="))
+            options = json.loads(raw.split("=", 1)[1])
+        options.update({"quiet": True, "ignoreerrors": True, "proxy": ""})
+        url = f"http://127.0.0.1:{server.server_port}/FORBIDDEN.m3u8"
+        info = {
+            "url": url,
+            "ext": "mp4",
+            "protocol": "m3u8_native",
+            "id": "test",
+            # Unsupported but not recognized as DRM: forces native -> ffmpeg fallback.
+            "hls_media_playlist_data": '#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI="key"\n',
+        }
+        with yt_dlp.YoutubeDL(options) as ydl:
+            assert not hls.HlsFD(ydl, options).real_download(str(tmp_path / "out.mp4"), info)
+        assert requests == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_real_downloader_size_message_is_not_a_retryable_failure(
+    fake_ytdlp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_YTDLP_INFO", json.dumps({"id": "x"}))
+    monkeypatch.setenv("FAKE_YTDLP_OVERSIZE", "1")
+    got = media.run_ytdlp(URL, fake_ytdlp, GuardProxy(verify=None), limit=10)
+    result = grab_media(URL, lambda u, p, limit: got, lambda g: pytest.fail("kept"), limit=10)
+    assert result.outcome == "deferred" and result.limited
+
+
+def test_media_storage_scrubs_custom_outcomes(tmp_path: Path) -> None:
+    store = LocalStore(tmp_path)
+    got = MediaOutcome("ok", info={"webpage_url": "https://example.org/post?auth_token=SECRET"})
+    store_media(store, "", "https://example.org/post?mc_eid=SECRET", got, "now")
+    assert b"SECRET" not in (store.get("info.json") or b"")
+    assert b"SECRET" not in (store.get("capture.json") or b"")

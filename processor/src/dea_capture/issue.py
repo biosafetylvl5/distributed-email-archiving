@@ -17,7 +17,7 @@ issue's status without reading bodies:
 
 - ``issue-status/<sha>.json``: counts only, also set as the object's
   metadata (R2 ``customMetadata``), plus the source key. Written after the
-  manifest; an issue skipped as done gets one if it's missing.
+  manifest; a resumed issue repairs a missing or stale status.
 
 Then ``issues/<sha>/view/``, the message as the dashboard shows it (see
 ``view``): rendered again whenever the links change, and for an issue
@@ -64,9 +64,11 @@ Status = Literal["ok", "failed", "refused", "deferred:size", "deferred:budget"]
 
 # 2: srcset URLs keep their commas
 # 3: poster, input type=image, icon links, @import, and what stylesheets refer to
-EXTRACT_VERSION = 3
+# 4: attached messages cannot shadow outer cid parts
+EXTRACT_VERSION = 4
 MAX_CSS_DEPTH = 3
 MAX_CSS_ASSETS = 300
+MAX_ORIGINAL_EMBEDS = 300
 _STYLESHEETS = frozenset({"stylesheet", "css-import"})
 
 
@@ -244,9 +246,12 @@ def process_issue(
                     _view(store, sha, raw, old, doc, line)
                     return IssueResult(sha, skipped=False, counts=line)
                 captures = load_links(store, sha)
-                if not store.exists(status_key(sha)):
+                expected = {"sha256": sha, **issue_status(old, links, captures)}
+                status = store.get(status_key(sha))
+                stale = status is not None and json.loads(status) != expected
+                if status is None or stale:
                     write_status(store, sha, old, links, captures)
-                if not view_current(store, sha):
+                if stale or not view_current(store, sha):
                     line = {}
                     _view(store, sha, raw, old, captures, line)
                     return IssueResult(sha, skipped=False, counts=line)
@@ -265,17 +270,28 @@ def process_issue(
     queue: deque[tuple[Embed, str | None, int]] = deque((e, None, 0) for e in inv.embeds)
     seen = {e.url for e in inv.embeds}
     from_css = 0
+    originals = 0
     while queue:
         embed, parent, depth = queue.popleft()
-        if parent is not None and from_css >= MAX_CSS_ASSETS:
+        if embed.url in reuse:
+            rec, reused = reuse[embed.url], reused + 1
+        elif parent is None and originals >= MAX_ORIGINAL_EMBEDS:
+            rec = AssetRecord(
+                url=embed.url,
+                via="",
+                pixel=False,
+                status="deferred:budget",
+                error=f"over {MAX_ORIGINAL_EMBEDS} original embeds",
+            )
+        elif parent is not None and from_css >= MAX_CSS_ASSETS:
             rec = AssetRecord(
                 url=embed.url, via="", pixel=False, status="deferred:budget",
                 error=f"over {MAX_CSS_ASSETS} stylesheet assets",
             )  # fmt: skip
-        elif embed.url in reuse:
-            rec, reused = reuse[embed.url], reused + 1
         else:
             rec = fetch_embed(embed.url, fetcher, store, sha, pacer)
+            if parent is None:
+                originals += 1
         if parent is not None:
             from_css += 1
         rec.via, rec.pixel, rec.found_in = embed.via, embed.pixel, parent

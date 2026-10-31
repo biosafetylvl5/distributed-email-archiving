@@ -1,6 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { handleAdmin, type Authenticator } from "../src/admin/app";
 import type { Env } from "../src/env";
+import { CAPTURE_LIMITS_KEY, listQuarantine, listTags, listUsers, syncCaptureLimits } from "../src/admin/store";
+import { handleApi } from "../src/api/app";
+import { createToken } from "../src/api/tokens";
 import { fakeEnv, type FakeKV } from "./fakes";
 
 // a stored tag, less the time of its last save (checked on its own)
@@ -116,6 +119,76 @@ describe("users", () => {
   });
 });
 
+describe("strict KV reads", () => {
+  it("leaves a user unchanged when its mutation read fails", async () => {
+    const { env, users } = fakeEnv();
+    const record = { active: true, note: "keep" };
+    await users.put("ann", JSON.stringify(record));
+    const read = users.get.bind(users);
+    vi.spyOn(users, "get")
+      .mockImplementationOnce(read)
+      .mockRejectedValueOnce(new Error("KV unavailable"));
+    expect((await post(env, "/users/ann/active", { active: "0" })).status).toBe(500);
+    expect(users.json("ann")).toEqual(record);
+  });
+
+  it.each(["unavailable", "malformed"])("leaves a tag unchanged on a %s read", async (failure) => {
+    const { env, users, tags, archive } = fakeEnv();
+    await users.put("ann", JSON.stringify({ active: true }));
+    const raw = failure === "malformed" ? "{broken" : JSON.stringify({ status: "approved", capture_limit_mb: 10, note: "keep" });
+    await tags.put("ann/news", raw);
+    if (failure === "unavailable") vi.spyOn(tags, "get").mockRejectedValueOnce(new Error("KV unavailable"));
+    expect((await post(env, "/users/ann/tags", { tag: "news", status: "blocked" })).status).toBe(500);
+    expect(tags.data.get("ann/news")).toBe(raw);
+    expect(archive.objects.has(CAPTURE_LIMITS_KEY)).toBe(false);
+  });
+
+  it("refuses API create when the explicit existence read fails", async () => {
+    const { env, users, tags } = fakeEnv();
+    await users.put("ann", JSON.stringify({ active: true }));
+    const blocked = { status: "blocked", note: "keep" };
+    await tags.put("ann/news", JSON.stringify(blocked));
+    const token = await createToken(env, "ann", "test", "admin@example.org");
+    const read = tags.get.bind(tags);
+    vi.spyOn(tags, "get")
+      .mockImplementationOnce(read) // the initial list succeeds
+      .mockRejectedValueOnce(new Error("KV unavailable"));
+    const res = await handleApi(new Request("https://mail-api.example.org/v1/subscriptions", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ tag: "news", name: "News" }),
+    }), env);
+    expect(res.status).toBe(500);
+    expect(tags.json("ann/news")).toEqual(blocked);
+  });
+
+  it("never publishes a partial limits map after a failed read", async () => {
+    const { env, tags, archive } = fakeEnv();
+    await tags.put("ann/news", JSON.stringify({ capture_limit_mb: 10 }));
+    await tags.put("ann/other", JSON.stringify({ capture_limit_mb: 20 }));
+    await syncCaptureLimits(env);
+    const before = await (await archive.get(CAPTURE_LIMITS_KEY))!.text();
+    const read = tags.get.bind(tags);
+    vi.spyOn(tags, "get").mockImplementation((key, opts) => {
+      if (key === "ann/other") throw new Error("KV unavailable");
+      return read(key, opts);
+    });
+    await expect(syncCaptureLimits(env)).rejects.toThrow("KV unavailable");
+    expect(await (await archive.get(CAPTURE_LIMITS_KEY))!.text()).toBe(before);
+  });
+
+  it("reads all KV pages for users and tags", async () => {
+    const { env, users, tags } = fakeEnv();
+    users.pageSize = tags.pageSize = 1;
+    for (const name of ["ann", "bob"]) {
+      await users.put(name, JSON.stringify({ active: true }));
+      await tags.put(`${name}/news`, JSON.stringify({ capture_limit_mb: 10 }));
+    }
+    expect((await listUsers(env)).map((u) => u.name)).toEqual(["ann", "bob"]);
+    expect((await listTags(env)).map((t) => t.user)).toEqual(["ann", "bob"]);
+  });
+});
+
 describe("subscriptions", () => {
   it("creates and edits tags, preserving unknown fields", async () => {
     const { env, users, tags } = fakeEnv();
@@ -209,6 +282,39 @@ describe("subscriptions", () => {
     expect(saved(tags, "ann/ramen")).not.toHaveProperty("capture_limit_mb");
   });
 
+  it("repairs a failed mirror write on an identical tag save", async () => {
+    const { env, users, tags, archive } = fakeEnv();
+    await users.put("ann", JSON.stringify({ active: true }));
+    await tags.put("ann/news", JSON.stringify({ status: "approved", capture_limit_mb: 10 }));
+    await syncCaptureLimits(env);
+    vi.spyOn(archive, "put").mockRejectedValueOnce(new Error("R2 unavailable"));
+    const form = { tag: "news", status: "approved", capture_limit_mb: "20" };
+    expect((await post(env, "/users/ann/tags", form)).status).toBe(500);
+    expect(tags.json("ann/news")).toMatchObject({ capture_limit_mb: 20 });
+    expect(JSON.parse(await (await archive.get(CAPTURE_LIMITS_KEY))!.text()).limits).toEqual({ "ann/news": 10 * 2 ** 20 });
+    expect((await post(env, "/users/ann/tags", form)).status).toBe(303);
+    expect(JSON.parse(await (await archive.get(CAPTURE_LIMITS_KEY))!.text()).limits).toEqual({ "ann/news": 20 * 2 ** 20 });
+  });
+
+  it("offers an authenticated same-origin action to re-sync out-of-band limits", async () => {
+    const { env, tags, archive } = fakeEnv();
+    await tags.put("ann/news", JSON.stringify({ capture_limit_mb: 10 }));
+    await syncCaptureLimits(env);
+    await tags.put("ann/news", JSON.stringify({ status: "blocked" }));
+    const path = "/settings/capture-limits/sync";
+    expect(await (await get(env, "/settings")).text()).toContain(`action="${path}"`);
+    expect((await get(env, path)).status).toBe(404);
+    expect((await post(env, path, {}, "https://other.example.org")).status).toBe(403);
+    expect((await post(env, path, {}, null)).status).toBe(403);
+    const denied = await handleAdmin(new Request(ORIGIN + path, { method: "POST", headers: { origin: ORIGIN } }), env, deny);
+    expect(denied.status).toBe(403);
+    expect(JSON.parse(await (await archive.get(CAPTURE_LIMITS_KEY))!.text()).limits).toEqual({ "ann/news": 10 * 2 ** 20 });
+    const res = await post(env, path, {});
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toContain("/settings?msg=");
+    expect(JSON.parse(await (await archive.get(CAPTURE_LIMITS_KEY))!.text()).limits).toEqual({});
+  });
+
   it("validates tag, status, sender domain and user", async () => {
     const { env, users, tags } = fakeEnv();
     await users.put("ann", JSON.stringify({ active: true }));
@@ -224,12 +330,13 @@ describe("subscriptions", () => {
   it("stores, shows and clears a sign-up link", async () => {
     const { env, users, tags } = fakeEnv();
     await users.put("ann", JSON.stringify({ active: true }));
-    const url = "https://ramen.example/subscribe?ref=a&b=\"x\"";
+    const url = "https://user:SECRET@ramen.example.org/subscribe?token=SECRET#SECRET";
     await post(env, "/users/ann/tags", { tag: "ramen", status: "approved", signup_url: url });
-    expect(saved(tags, "ann/ramen")).toEqual({ status: "approved", publish: false, signup_url: url });
+    expect(saved(tags, "ann/ramen")).toEqual({ status: "approved", publish: false, signup_url: "https://ramen.example.org/subscribe" });
 
     const body = await (await get(env, "/subscriptions")).text();
-    expect(body).toContain('href="https://ramen.example/subscribe?ref=a&amp;b=&quot;x&quot;"');
+    expect(body).toContain('href="https://ramen.example.org/subscribe"');
+    expect(body).not.toContain("SECRET");
 
     await post(env, "/users/ann/tags", { tag: "ramen", status: "approved", signup_url: "" });
     expect(saved(tags, "ann/ramen")).toEqual({ status: "approved", publish: false });
@@ -275,6 +382,18 @@ describe("subscriptions", () => {
     // the user page's short "new tag" form has no description, note or link
     await post(env, "/users/ann/tags", { tag: "ramen", status: "approved", name: "Ramen", sender_domain: "" });
     expect(saved(tags, "ann/ramen")).toEqual({ ...full, name: "Ramen", publish: false });
+  });
+
+  it("normalizes legacy sign-up URLs in links and edit forms", async () => {
+    const { env, users, tags } = fakeEnv();
+    await users.put("ann", JSON.stringify({ active: true }));
+    await tags.put("ann/x", JSON.stringify({ status: "approved", signup_url: "https://user:SECRET@example.org/signup?token=SECRET#SECRET" }));
+    for (const path of ["/subscriptions", "/users/ann"]) {
+      const body = await (await get(env, path)).text();
+      expect(body).toContain('href="https://example.org/signup"');
+      expect(body).toContain('name="signup_url" value="https://example.org/signup"');
+      expect(body).not.toContain("SECRET");
+    }
   });
 
   it("does not link sign-up URLs with unsafe schemes written directly to KV", async () => {
@@ -344,6 +463,42 @@ describe("overview", () => {
     expect(body).toMatch(/<code>global<\/code><\/td><td>7<\/td><td>500/);
     expect(body).toMatch(/<code>tag:ann\/news<\/code><\/td><td>3<\/td><td>50/);
     expect(body).not.toContain(">99<");
+  });
+});
+
+describe("R2 listing contracts", () => {
+  it("paginates objects and projects metadata only when requested", async () => {
+    const { archive } = fakeEnv();
+    archive.pageSize = 1;
+    for (const key of ["a", "b"]) await archive.put(key, "mail", {
+      customMetadata: { user: "ann" }, httpMetadata: { contentType: "text/plain" },
+    });
+    const first = await archive.list();
+    expect(first.truncated).toBe(true);
+    expect(first.objects.map((o) => o.key)).toEqual(["a"]);
+    expect(first.objects[0].customMetadata).toBeUndefined();
+    expect(first.objects[0].httpMetadata).toBeUndefined();
+    const second = await archive.list({ cursor: first.cursor, include: ["customMetadata", "httpMetadata"] });
+    expect(second.truncated).toBe(false);
+    expect(second.objects.map((o) => o.key)).toEqual(["b"]);
+    expect(second.objects[0].customMetadata).toEqual({ user: "ann" });
+    expect(second.objects[0].httpMetadata).toEqual({ contentType: "text/plain" });
+  });
+
+  it("reads quarantine day and object pages with custom metadata", async () => {
+    const { env, archive } = fakeEnv();
+    archive.pageSize = 1;
+    const keys = [
+      `incoming/quarantine/2026-10-26/${"a".repeat(64)}.eml`,
+      `incoming/quarantine/2026-10-26/${"b".repeat(64)}.eml`,
+      `incoming/quarantine/2026-10-25/${"c".repeat(64)}.eml`,
+    ];
+    for (const [i, key] of keys.entries()) {
+      await archive.put(key, `Subject: message ${i}\r\n\r\n`, { customMetadata: { user: "ann", tag: String(i) } }, new Date(`2026-10-2${i === 2 ? 5 : 6}T0${i}:00:00Z`));
+    }
+    const items = await listQuarantine(env);
+    expect(items.map((o) => o.key)).toEqual([keys[1], keys[0], keys[2]]);
+    expect(items.map((o) => o.meta.tag)).toEqual(["1", "0", "2"]);
   });
 });
 

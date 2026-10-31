@@ -1,5 +1,6 @@
 // client for the archive's subscription API (cloudflare/src/api/app.ts)
 
+import { normalizeSignupUrl } from "../../cloudflare/src/tagfields";
 import type { Config } from "./config";
 
 export interface Subscription {
@@ -62,6 +63,13 @@ export class ApiError extends Error {
   }
 }
 
+function safeFields<T extends Editable>(fields: T): T {
+  if (!fields.signup_url?.trim()) return fields;
+  const signup_url = normalizeSignupUrl(fields.signup_url.trim());
+  if (!signup_url) throw new ApiError(422, "invalid", "signup_url must be an http or https URL");
+  return { ...fields, signup_url };
+}
+
 export class Api {
   constructor(private readonly config: Pick<Config, "apiUrl" | "token">) {}
 
@@ -100,17 +108,19 @@ export class Api {
     return (await this.request<{ subscriptions: Subscription[] }>("GET", "/v1/subscriptions")).subscriptions;
   }
 
-  lookup(url: string): Promise<Lookup> {
-    return this.request("GET", `/v1/subscriptions/lookup?url=${encodeURIComponent(url)}`);
+  async lookup(url: string): Promise<Lookup> {
+    const page = normalizeSignupUrl(url);
+    if (!page) throw new ApiError(422, "invalid", "url must be an http or https URL");
+    return this.request("GET", `/v1/subscriptions/lookup?url=${encodeURIComponent(page)}`);
   }
 
   async create(fields: Editable & { tag?: string }): Promise<Subscription> {
-    return (await this.request<{ subscription: Subscription }>("POST", "/v1/subscriptions", fields)).subscription;
+    return (await this.request<{ subscription: Subscription }>("POST", "/v1/subscriptions", safeFields(fields))).subscription;
   }
 
   async update(tag: string, fields: Editable, ifUpdatedAt: string | null): Promise<Subscription> {
     const path = `/v1/subscriptions/${encodeURIComponent(tag)}`;
-    const body = { ...fields, if_updated_at: ifUpdatedAt };
+    const body = { ...safeFields(fields), if_updated_at: ifUpdatedAt };
     return (await this.request<{ subscription: Subscription }>("PATCH", path, body)).subscription;
   }
 }

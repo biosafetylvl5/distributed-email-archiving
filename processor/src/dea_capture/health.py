@@ -8,6 +8,7 @@ stale or missing stamp means the poller is gone and the pod should restart.
 
 from __future__ import annotations
 
+import math
 import re
 import time
 import urllib.request
@@ -19,16 +20,30 @@ _SAMPLE = re.compile(rf"^{SCAN_METRIC}(?:\{{[^}}]*\}})?\s+([0-9.eE+-]+)\s*$", re
 def last_scan(metrics_text: str) -> float | None:
     """The oldest last-scan stamp across monitors: every one must be fresh."""
     stamps = [float(m.group(1)) for m in _SAMPLE.finditer(metrics_text)]
-    stamps = [s for s in stamps if s > 0]
-    return min(stamps) if stamps else None
+    return min(stamps) if stamps and all(math.isfinite(s) and s > 0 for s in stamps) else None
 
 
-def check(metrics_text: str, max_age: float, now: float | None = None) -> tuple[bool, str]:
+def check(
+    metrics_text: str,
+    max_age: float,
+    now: float | None = None,
+    *,
+    expected_monitors: int = 1,
+    startup_grace: float = 0,
+) -> tuple[bool, str]:
+    samples = list(_SAMPLE.finditer(metrics_text))
     stamp = last_scan(metrics_text)
-    if stamp is None:
-        return False, f"no {SCAN_METRIC} sample yet"
+    if expected_monitors < 1:
+        return False, "expected monitor count must be positive"
+    if stamp is None or len(samples) < expected_monitors:
+        uptime = re.search(
+            r"^courier_service_uptime_seconds\s+([0-9.eE+-]+)\s*$", metrics_text, re.MULTILINE
+        )
+        if uptime and 0 <= float(uptime.group(1)) < startup_grace:
+            return True, "waiting for scans during startup grace"
+        return False, f"no fresh sample for every monitor ({len(samples)}/{expected_monitors})"
     age = (now if now is not None else time.time()) - stamp
-    if age > max_age:
+    if not 0 <= age <= max_age:
         return False, f"last scan {age:.0f}s ago (limit {max_age:.0f}s)"
     return True, f"last scan {age:.0f}s ago"
 

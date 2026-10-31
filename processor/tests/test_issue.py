@@ -282,3 +282,113 @@ def test_skipped_issue_gets_a_missing_status(tmp_path: Path) -> None:
     assert result.skipped and again.requested == []  # type: ignore[attr-defined]
     assert store.metadata(status_key(sha)) == before
     assert store.metadata(status_key(sha))["state"] == "done"  # type: ignore[index]
+
+
+def test_original_embed_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from email.message import EmailMessage
+
+    monkeypatch.setattr(dea_capture.issue, "MAX_ORIGINAL_EMBEDS", 2, raising=False)
+    msg = EmailMessage()
+    msg.set_content(
+        "".join(f'<img src="https://cdn.example.com/{i}.png">' for i in range(4)), subtype="html"
+    )
+    raw = msg.as_bytes()
+    store, cdn = LocalStore(tmp_path), FakeCDN()
+    _run(raw, store, cdn)
+    assert len(cdn.requested) == 2
+    manifest = _manifest(store, raw)
+    assert [a["status"] for a in manifest["assets"]] == [
+        "ok",
+        "ok",
+        "deferred:budget",
+        "deferred:budget",
+    ]
+    assert (store.metadata(status_key(manifest["sha256"])) or {})["assets_deferred"] == "2"
+
+
+def test_resumes_after_captures_written_before_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from email.message import EmailMessage
+
+    from dea_capture.links import captures_key
+    from dea_capture.view import view_meta_key
+
+    msg = EmailMessage()
+    msg.set_content('<a href="https://example.com/article">read</a>', subtype="html")
+    raw = msg.as_bytes()
+    sha = hashlib.sha256(raw).hexdigest()
+    store, cdn = LocalStore(tmp_path), FakeCDN()
+    _run(raw, store, cdn)
+    before = store.get(view_meta_key(sha))
+
+    def make(inv: Inventory) -> GuardedFetcher:
+        return GuardedFetcher(cdn, resolve=fake_resolver, refused_urls=inv.refused_urls())
+
+    def crash(*args: object, **kwargs: object) -> None:
+        raise OSError("interrupted status write")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(dea_capture.issue, "write_status", crash)
+        with pytest.raises(OSError, match="interrupted"):
+            _run(raw, store, cdn, make_resolver=make)
+    assert store.exists(captures_key(sha))
+    assert (store.metadata(status_key(sha)) or {})["links_state"] == "pending"
+    # The old view is present and version-current, but must be regenerated too.
+    assert store.get(view_meta_key(sha)) == before
+    result = process_issue(
+        raw,
+        store,
+        make,
+        source="s3://bucket/incoming/archive/x.eml",
+        make_resolver=make,
+        pacer=HostPacer(0),
+    )
+    assert not result.skipped and result.counts["view"] == 1
+    assert (store.metadata(status_key(sha)) or {})["links_state"] == "done"
+    assert cdn.requested == []
+
+
+def test_relink_keeps_concurrently_resolved_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+    from email.message import EmailMessage
+    from typing import Any
+
+    from dea_capture import links
+    from dea_capture.issue import relink_issue
+
+    msg = EmailMessage()
+    href = "https://click.example.com/abc?j=SECRET"
+    msg.set_content(f'<a href="{href}">Read</a>', subtype="html")
+    raw = msg.as_bytes()
+    store, cdn = LocalStore(tmp_path), FakeCDN()
+    _run(raw, store, cdn)
+    sha = hashlib.sha256(raw).hexdigest()
+    failed = {"href": href, "decision": "resolve", "outcome": "failed"}
+    put_json(store, links.captures_key(sha), {"links": [failed]})
+    resolved = {**failed, "outcome": "ok", "canonical": "https://example.com/article"}
+
+    def racing_result(*args: Any, **kwargs: Any) -> links.LinkRecord:
+        put_json(
+            store,
+            links.captures_key(sha),
+            {"links": [resolved], "relinked_at": "2026-10-28T00:00:00Z"},
+        )
+        return links.LinkRecord(href, "resolve", "failed", http_status=503)
+
+    monkeypatch.setattr(links, "_link_record", racing_result)
+    relink_issue(
+        raw,
+        store,
+        lambda inv: GuardedFetcher(cdn, resolve=fake_resolver),
+        now=datetime(2026, 10, 27, tzinfo=UTC),
+        pacer=HostPacer(0),
+    )
+    doc = links.load_links(store, sha)
+    assert doc and doc["links"] == [resolved]
+    assert (store.metadata(status_key(sha)) or {})["links_unresolved"] == "0"
+    assert b"https://example.com/article" in (store.get(f"issues/{sha}/view/index.html") or b"")

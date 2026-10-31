@@ -60,6 +60,7 @@ def _cmd_issue(args: argparse.Namespace) -> int:
     source: str = args.source
     store: Store
     subscription = None
+    dry_run = args.dry_run or os.environ.get("DEA_MODE") == "dry-run"
     if source.startswith("s3://"):
         bucket, key = split_s3_uri(source)
         s3 = S3Store(bucket)
@@ -71,12 +72,12 @@ def _cmd_issue(args: argparse.Namespace) -> int:
         store = LocalStore(Path(args.out)) if args.out else s3
     else:
         raw = Path(source).read_bytes()
-        if not args.out and not args.dry_run:
+        if not args.out and not dry_run:
             print("--out DIR is required for a local file", file=sys.stderr)
             return 2
         store = LocalStore(Path(args.out or "."))
 
-    if args.dry_run or os.environ.get("DEA_MODE") == "dry-run":
+    if dry_run:
         s = inventory(raw).summary()
         print("ISSUE dry-run " + json.dumps(s, sort_keys=True))
         return 0
@@ -208,7 +209,17 @@ def _relinker(store: Store, pacer: HostPacer) -> retry.Relinker:
     return relink
 
 
+def _cmd_reconcile(args: argparse.Namespace) -> int:
+    store = S3Store(_bucket(args.bucket))
+    repaired = capture.reconcile(
+        store, [o.key for o in store.listing("captures/index/")], datetime.now(UTC)
+    )
+    print(f"RECONCILE repaired={repaired}")
+    return 0
+
+
 def _cmd_summary(args: argparse.Namespace) -> int:
+    _cmd_reconcile(args)
     store = S3Store(_bucket(args.bucket))
     if not args.no_retries:
         keys = [o.key for o in store.listing(summary.RETRY_REQUESTS)]
@@ -232,7 +243,12 @@ def _cmd_relink(args: argparse.Namespace) -> int:
         cached = {}
     sources = []
     for o in store.listing("issue-status/"):
-        meta = cached[o.key][1] if o.key in cached else store.metadata(o.key) or {}
+        prior = cached.get(o.key)
+        meta = (
+            prior[1]
+            if prior is not None and summary.cache_current(prior, o)
+            else store.metadata(o.key) or {}
+        )
         if meta.get("links_unresolved", "0") not in ("", "0"):
             sources.append(meta.get("source", ""))
     totals: Counter[str] = Counter(messages=len(sources))
@@ -260,7 +276,12 @@ def _cmd_healthcheck(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"unhealthy: metrics unreachable: {exc}")
         return 1
-    ok, why = health.check(text, args.max_scan_age)
+    ok, why = health.check(
+        text,
+        args.max_scan_age,
+        expected_monitors=args.expected_monitors,
+        startup_grace=args.startup_grace,
+    )
     print(("healthy: " if ok else "unhealthy: ") + why)
     return 0 if ok else 1
 
@@ -316,6 +337,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("due", metavar="DUE", help="s3://bucket/captures/due/<kind>/<key>.json")
     p.add_argument("--no-wayback", action="store_true", help="no Wayback Machine fallback")
     p.set_defaults(func=_cmd_capture)
+
+    p = sub.add_parser("reconcile", help="repair missing capture schedules and raised limits")
+    p.add_argument("bucket", metavar="BUCKET", help="s3://bucket")
+    p.set_defaults(func=_cmd_reconcile)
 
     p = sub.add_parser(
         "page",
@@ -391,6 +416,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--max-scan-age", type=float, default=900.0, metavar="SECONDS",
         help="fail when the S3 poller's last completed scan is older than this",
     )  # fmt: skip
+    p.add_argument(
+        "--expected-monitors",
+        type=int,
+        default=5,
+        help="number of S3 pollers in the service (default %(default)s)",
+    )
+    p.add_argument(
+        "--startup-grace",
+        type=float,
+        default=300,
+        help="seconds of courier uptime allowed before every poller must scan",
+    )
     p.set_defaults(func=_cmd_healthcheck)
 
     args = parser.parse_args(argv)

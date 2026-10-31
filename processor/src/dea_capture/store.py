@@ -3,15 +3,20 @@
 All state lives in the store, so every stage can be re-run safely.
 ``put(..., if_absent=True)`` is the claim primitive: on S3 it is a
 conditional ``If-None-Match: *`` PUT, so two workers can't both win.
+``get_with_etag`` and ``put(..., if_match=etag)`` fence subsequent updates.
 """
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import mimetypes
 import os
 import shutil
-from collections.abc import Mapping
+import time
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,15 +37,18 @@ class Listed:
 class Store(Protocol):
     def get(self, key: str) -> bytes | None: ...
 
+    def get_with_etag(self, key: str) -> tuple[bytes, str] | None: ...
+
     def exists(self, key: str) -> bool: ...
 
     def put(
         self, key: str, data: bytes, content_type: str, *, if_absent: bool = False,
+        if_match: str | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> bool:  # fmt: skip
         """Write ``key``. With ``if_absent``, returns False instead of
-        overwriting an existing object. ``metadata`` becomes the object's
-        user metadata (R2 ``customMetadata``)."""
+        overwriting an existing object; ``if_match`` requires the read ETag.
+        ``metadata`` becomes the object's user metadata (R2 ``customMetadata``)."""
         ...
 
     def put_file(self, key: str, path: Path, content_type: str) -> None:
@@ -54,10 +62,22 @@ class Store(Protocol):
 
 def put_json(
     store: Store, key: str, obj: object, *, if_absent: bool = False,
+    if_match: str | None = None,
     metadata: Mapping[str, str] | None = None,
 ) -> bool:  # fmt: skip
     data = (json.dumps(obj, indent=2, sort_keys=False) + "\n").encode()
-    return store.put(key, data, "application/json", if_absent=if_absent, metadata=metadata)
+    return store.put(
+        key, data, "application/json", if_absent=if_absent, if_match=if_match, metadata=metadata
+    )
+
+
+def conditional_write_attempts(key: str) -> Iterator[None]:
+    """Bound reload/merge/write retries; callers stop on success or a missing record."""
+    for attempt in range(5):
+        if attempt:
+            time.sleep(0.01 * attempt)
+        yield
+    raise RuntimeError(f"conditional write for {key} conflicted after 5 attempts")
 
 
 @dataclass
@@ -74,20 +94,38 @@ class LocalStore:
         path = self._path(key)
         return path.read_bytes() if path.is_file() else None
 
+    def get_with_etag(self, key: str) -> tuple[bytes, str] | None:
+        data = self.get(key)
+        return (data, hashlib.sha256(data).hexdigest()) if data is not None else None
+
+    @contextmanager
+    def _lock(self, key: str) -> Iterator[None]:
+        path = self._path(f".meta/.locks/{hashlib.sha256(key.encode()).hexdigest()}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
     def exists(self, key: str) -> bool:
         return self._path(key).is_file()
 
     def delete(self, key: str) -> None:
-        self._path(key).unlink(missing_ok=True)
-        self._meta_path(key).unlink(missing_ok=True)
+        with self._lock(key):
+            self._path(key).unlink(missing_ok=True)
+            self._meta_path(key).unlink(missing_ok=True)
 
     def _meta_path(self, key: str) -> Path:
         return self._path(f".meta/{key}.json")
 
     def put_file(self, key: str, path: Path, content_type: str) -> None:
-        dest = self._path(key)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(path, dest)
+        with self._lock(key):
+            dest = self._path(key)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, dest)
+            self._meta_path(key).unlink(missing_ok=True)
 
     def metadata(self, key: str) -> dict[str, str] | None:
         """What ``put`` was given as ``metadata``, kept beside the store."""
@@ -111,25 +149,28 @@ class LocalStore:
 
     def put(
         self, key: str, data: bytes, content_type: str, *, if_absent: bool = False,
+        if_match: str | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> bool:  # fmt: skip
-        path = self._path(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if if_absent:
-            try:
-                with path.open("xb") as f:
-                    f.write(data)
-            except FileExistsError:
+        with self._lock(key):
+            if if_absent and self.exists(key):
                 return False
-        else:
+            if if_match is not None:
+                current = self.get_with_etag(key)
+                if current is None or current[1] != if_match:
+                    return False
+            path = self._path(key)
+            path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_name(path.name + ".tmp")
             tmp.write_bytes(data)
             tmp.replace(path)
-        if metadata is not None:
             meta = self._meta_path(key)
-            meta.parent.mkdir(parents=True, exist_ok=True)
-            meta.write_text(json.dumps(dict(metadata), sort_keys=True))
-        return True
+            if metadata is None:
+                meta.unlink(missing_ok=True)
+            else:
+                meta.parent.mkdir(parents=True, exist_ok=True)
+                meta.write_text(json.dumps(dict(metadata), sort_keys=True))
+            return True
 
 
 @dataclass
@@ -147,12 +188,15 @@ class S3Store:
             self.client = boto3.client("s3", region_name=os.environ.get("AWS_REGION", "auto"))
 
     def get(self, key: str) -> bytes | None:
+        got = self.get_with_etag(key)
+        return got[0] if got is not None else None
+
+    def get_with_etag(self, key: str) -> tuple[bytes, str] | None:
         try:
             obj = self.client.get_object(Bucket=self.bucket, Key=key)
         except self.client.exceptions.NoSuchKey:
             return None
-        body: bytes = obj["Body"].read()
-        return body
+        return obj["Body"].read(), obj["ETag"]
 
     def exists(self, key: str) -> bool:
         from botocore.exceptions import ClientError
@@ -167,6 +211,7 @@ class S3Store:
 
     def put(
         self, key: str, data: bytes, content_type: str, *, if_absent: bool = False,
+        if_match: str | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> bool:  # fmt: skip
         from botocore.exceptions import ClientError
@@ -178,11 +223,18 @@ class S3Store:
             kwargs["Metadata"] = dict(metadata)
         if if_absent:
             kwargs["IfNoneMatch"] = "*"
+        if if_match is not None:
+            kwargs["IfMatch"] = if_match
         try:
             self.client.put_object(**kwargs)
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code")
-            if if_absent and code in {"PreconditionFailed", "412"}:
+            if (if_absent or if_match is not None) and code in {
+                "PreconditionFailed",
+                "412",
+                "ConditionalRequestConflict",
+                "409",
+            }:
                 return False
             raise
         return True

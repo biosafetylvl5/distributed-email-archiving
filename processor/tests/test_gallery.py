@@ -16,6 +16,7 @@ from dea_capture.capture import (
     gallery_post,
     guess_kind,
     index_key,
+    parse_due_key,
     queue,
     run,
     url_hash,
@@ -69,6 +70,22 @@ def offline_guard(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_gallery_post(url: str, post: bool) -> None:
     assert gallery_post(url) is post
     assert (guess_kind(url, "text/html") == "gallery") is post
+
+
+def test_seed_dns_failure_is_retryable(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(host: str, port: int) -> list[str]:
+        raise OSError("DNS unavailable")
+
+    def check(url: str, **kwargs: Any) -> object:
+        return guard.check_destination(url, broken)
+
+    def never(url: str, path: Path, limit: int | None) -> Haul:
+        pytest.fail("collector started after failed DNS")
+
+    monkeypatch.setattr(gallery, "check_destination", check)
+    got = collect("https://example.org/post", never, lambda g: pytest.fail("kept"))
+    assert got.outcome == "failed"
+    assert got.error == "cannot resolve example.org"
 
 
 def test_gallerydl_args_keep_it_behind_the_proxy(tmp_path: Path) -> None:
@@ -270,7 +287,8 @@ def test_a_post_queued_as_a_page_moves_to_gallery_and_not_back(tmp_path: Path) -
     result = run(store, key, _guarded(), now=T0, page_crawler=lambda u: pytest.fail("crawled"))
     assert result.outcome == "rerouted"
     rec = _rec(store)
-    assert (rec.kind, rec.due) == ("gallery", due_key("gallery", T0, rec.h))
+    assert rec.kind == "gallery"
+    assert rec.due is not None and parse_due_key(rec.due) == ("gallery", T0, rec.h)
     # which finds a login wall, and hands it back
     c = _collector(fake_collector(exit_code=16, post=None))
     assert rec.due
@@ -281,3 +299,25 @@ def test_a_post_queued_as_a_page_moves_to_gallery_and_not_back(tmp_path: Path) -
     assert rec.due
     result = run(store, rec.due, _guarded(), now=T0, page_crawler=crawler)
     assert result.outcome == "ok"
+
+
+def test_gallery_scrub_canonicalizes_auth_and_tracking_parameters() -> None:
+    got = scrub(
+        {
+            "post": "HTTPS://example.org/post?auth_token=SECRET",
+            "author": ["https://example.org/author?mc_eid=SECRET"],
+            "file": "https://example.org/image.jpg?x-amz-signature=SECRET",
+        }
+    )
+    assert "SECRET" not in json.dumps(got)
+    assert got["post"] == "https://example.org/post"
+
+
+def test_gallery_storage_scrubs_custom_outcomes(tmp_path: Path) -> None:
+    from dea_capture.gallery import store_gallery
+
+    store = LocalStore(tmp_path)
+    got = MediaOutcome("ok", info={"post": {"url": "https://example.org/post?auth_token=SECRET"}})
+    store_gallery(store, "", "https://example.org/post?mc_eid=SECRET", got, "now")
+    assert b"SECRET" not in (store.get("info.json") or b"")
+    assert b"SECRET" not in (store.get("capture.json") or b"")

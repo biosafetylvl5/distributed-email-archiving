@@ -8,6 +8,8 @@ listing the bucket, which costs more CPU than a Worker on the free plan has.
 - ``statuses``: each ``issue-status/`` record's key and the metadata the
   dashboard reads (``STATUS_META``: states, the message's key and counts, no
   URLs); a count of 0 is left out, which the dashboard reads as 0;
+- ``aggregates``: precomputed overview statistics and capture progress, including
+  all message rows for browsing; the Worker rehydrates dates and maps only;
 - ``retries``: how many of the dashboard's retry requests are waiting, and
   what the latest did (``dashboard/retries.json``);
 - ``urls``: how many ``captures/index/`` records there are of each kind and
@@ -24,8 +26,10 @@ a separate object, read only by the dashboard's storage page, so the summary
 stays small and has no URLs.
 
 It is written compact, since the Worker parses it on every page view. It is
-rebuilt from listings, so deleted objects drop out. Metadata is read
-(a HEAD request) only for objects whose ETag changed since the last run; the
+rebuilt from listings, so deleted objects drop out. Archive and capture
+aggregates are precomputed here, so the Worker only
+rehydrates their dates and maps. Full message rows are retained for browsing.
+Metadata is read (a HEAD request) when ETag or modification time changed; the
 ETags and metadata seen are kept in ``dashboard/summary-state.json``.
 """
 
@@ -181,18 +185,26 @@ def _storage(store: Listable, index: dict[str, dict[str, str]], now: datetime) -
     }
 
 
+def cache_current(prior: Any, obj: Listed) -> bool:
+    return (
+        isinstance(prior, list)
+        and len(prior) == 2
+        and prior[0] == [obj.etag, obj.modified.isoformat()]
+    )
+
+
 def _metadata_for(
     store: Listable, objects: list[Listed], seen: dict[str, list[Any]],
     keep: tuple[str, ...] | None, workers: int,
 ) -> tuple[dict[str, dict[str, str]], int]:  # fmt: skip
     """Each object's metadata (only the ``keep`` fields, if given): from
-    ``seen`` when its ETag hasn't changed, else read. Returns it and the
+    ``seen`` when its ETag and modification time match, else read. Returns it and the
     number read. Updates ``seen``."""
     got: dict[str, dict[str, str]] = {}
     stale = []
     for o in objects:
         prior = seen.get(o.key)
-        if prior and prior[0] == o.etag:
+        if prior is not None and cache_current(prior, o):
             got[o.key] = prior[1]
         else:
             stale.append(o)
@@ -207,10 +219,119 @@ def _metadata_for(
             if keep is not None:
                 meta = {k: v for k, v in meta.items() if k in keep}
             got[o.key] = meta
-            seen[o.key] = [o.etag, meta]
+            seen[o.key] = [[o.etag, o.modified.isoformat()], meta]
     for key in set(seen) - {o.key for o in objects}:
         del seen[key]
     return got, len(stale)
+
+
+def _aggregates(
+    incoming: list[dict[str, Any]], statuses: list[dict[str, Any]], now: datetime
+) -> dict[str, Any]:
+    def zero() -> dict[str, int]:
+        return {"archive": 0, "quarantine": 0}
+
+    def states() -> dict[str, int]:
+        return {"done": 0, "partial": 0, "pending": 0}
+
+    today = now.astimezone(UTC).date()
+    since7, since30 = str(today - timedelta(days=6)), str(today - timedelta(days=29))
+    days = {str(today - timedelta(days=i)): zero() for i in range(13, -1, -1)}
+    stats: dict[str, Any] = {
+        "partial": False,
+        "totals": {d: {"count": 0, "bytes": 0} for d in zero()},
+        "last7": zero(),
+        "last30": zero(),
+        "tags": {},
+        "oldestQuarantine": None,
+    }
+    captures: dict[str, Any] = {
+        "partial": False,
+        "messages": [],
+        "states": states(),
+        "linkStates": states(),
+        "totals": dict.fromkeys(STATUS_COUNTS, 0),
+        "lastCompleted": None,
+        "bySubscription": {},
+    }
+    by_source = {}
+    for obj in statuses:
+        meta = obj["customMetadata"]
+        if not meta.get("source"):
+            continue
+        by_source[meta["source"]] = {
+            "sha": obj["key"].split("/")[-1].removesuffix(".json"),
+            "source": meta["source"],
+            "state": "done" if meta.get("state") == "done" else "partial",
+            "linksState": meta.get("links_state")
+            if meta.get("links_state") in ("done", "partial")
+            else "pending",
+            "completedAt": meta.get("completed_at"),
+            "counts": {k: _count(meta.get(k)) for k in STATUS_COUNTS},
+        }
+    senders: dict[str, int] = {}
+    for obj in sorted(incoming, key=lambda o: o["key"], reverse=True):
+        _, disposition, day, *_ = obj["key"].split("/")
+        meta, size = obj["customMetadata"], obj["size"]
+        stats["totals"][disposition]["count"] += 1
+        stats["totals"][disposition]["bytes"] += size
+        for since, field in ((since7, "last7"), (since30, "last30")):
+            if day >= since:
+                stats[field][disposition] += 1
+        if day in days:
+            days[day][disposition] += 1
+        if disposition == "quarantine":
+            stats["oldestQuarantine"] = min(stats["oldestQuarantine"] or day, day)
+        user, tag = meta.get("user", ""), meta.get("tag", "")
+        subscription = f"{user}/{tag}"
+        if user:
+            t = stats["tags"].setdefault(
+                subscription,
+                {
+                    "user": user,
+                    "tag": tag,
+                    **zero(),
+                    "bytes": 0,
+                    "last": None,
+                },
+            )
+            t[disposition] += 1
+            t["bytes"] += size
+            t["last"] = max(t["last"] or obj["uploaded"], obj["uploaded"])
+        sender = meta.get("envelope_from", "")
+        domain = sender.rsplit("@", 1)[-1].strip().lower() if sender.rfind("@") > 0 else ""
+        if domain and day >= since30:
+            senders[domain] = senders.get(domain, 0) + 1
+        if disposition != "archive":
+            continue
+        capture = by_source.get(obj["key"])
+        state = capture["state"] if capture else "pending"
+        captures["states"][state] += 1
+        if capture:
+            captures["linkStates"][capture["linksState"]] += 1
+            for k, v in capture["counts"].items():
+                captures["totals"][k] += v
+            completed = capture["completedAt"]
+            if completed:
+                captures["lastCompleted"] = max(captures["lastCompleted"] or completed, completed)
+        if user:
+            captures["bySubscription"].setdefault(subscription, states())[state] += 1
+        captures["messages"].append(
+            {"key": obj["key"], "day": day, "user": user, "tag": tag, "capture": capture}
+        )
+    stats["days"] = [{"day": day, **v} for day, v in days.items()]
+    stats["senders"] = [
+        {"domain": d, "count": n}
+        for d, n in sorted(senders.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    return {"stats": stats, "captures": captures}
+
+
+def _count(value: str | None) -> int:
+    try:
+        return max(0, int(value or "0"))
+    except ValueError:
+        return 0
 
 
 def build(
@@ -274,6 +395,7 @@ def build(
         "generated_at": _iso(now()),
         "incoming": incoming_out,
         "statuses": statuses_out,
+        "aggregates": _aggregates(incoming_out, statuses_out, now()),
         "retries": _retries(store),
         "urls": {
             "total": total,

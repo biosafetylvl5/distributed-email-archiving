@@ -8,11 +8,14 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from dea_capture import retry
 from dea_capture.capture import (
     RETRY_AFTER,
     due_key,
     index_key,
+    parse_due_key,
     queue,
     run,
     save,
@@ -51,7 +54,8 @@ def test_reschedule_makes_a_far_off_retry_due_now(tmp_path: Path) -> None:
     h = _retrying(store)
     assert retry.reschedule(store, h, NOW)
     rec = _record(store, PDF)
-    assert (rec.status, rec.due) == ("retrying", due_key("direct", NOW, h))
+    assert rec.status == "retrying"
+    assert rec.due is not None and parse_due_key(rec.due) == ("direct", NOW, h)
     assert rec.due is not None and _due_keys(tmp_path) == [rec.due]
     # and the capture stage takes it
     web = Web(bodies={PDF: ("application/pdf", b"%PDF")})
@@ -110,7 +114,8 @@ def test_apply_requests_by_kind_and_status(tmp_path: Path) -> None:
     assert [r.get("error") for r in got[1:]] == ["invalid request: bad status",
                                                  "invalid request: bad scope"]  # fmt: skip
     assert not any(store.exists(k) for k in keys)
-    assert _record(store, PDF).due == due_key("direct", NOW, h)
+    due = _record(store, PDF).due
+    assert due is not None and parse_due_key(due) == ("direct", NOW, h)
     kept = json.loads(store.get(retry.RESULTS_KEY) or b"")
     assert kept[0] == got[-1] and len(kept) == 3
 
@@ -209,3 +214,86 @@ def test_a_message_request_out_of_time_waits_for_the_next_run(tmp_path: Path) ->
     other = _request(store, "ffffffff", {"scope": "message", "sha": "e" * 64})
     [got2] = retry.apply_requests(store, [other], NOW, None)
     assert got2["error"] == "message not processed yet" and not store.exists(other)
+
+
+@pytest.mark.parametrize("scope", ["urls", "message"])
+def test_retry_batch_budget_leaves_request_and_resumes_inside_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str
+) -> None:
+    store = LocalStore(tmp_path)
+    hashes = [f"{i:064x}" for i in range(1, 5)]
+    sha = "a" * 64
+    store.put(
+        STATE_KEY,
+        json.dumps(
+            {"index": {index_key(h): ["e", {"kind": "direct", "status": "failed"}] for h in hashes}}
+        ).encode(),
+        "application/json",
+    )
+    store.put(status_key(sha), b"{}", "application/json")
+    store.put(
+        captures_key(sha),
+        json.dumps({"links": [{"h": h} for h in hashes]}).encode(),
+        "application/json",
+    )
+    req = {"scope": scope, "kind": "direct", "status": "failed", "sha": sha}
+    key = _request(store, "eeeeeeee", req)
+    clock = [0.0]
+    seen: list[str] = []
+
+    def reschedule(store: Any, h: str, now: Any) -> bool:
+        seen.append(h)
+        clock[0] += 2
+        return True
+
+    monkeypatch.setattr(retry, "reschedule", reschedule)
+    monkeypatch.setattr("dea_capture.retry.time.monotonic", lambda: clock[0])
+    first = retry.apply_requests(store, [key], NOW, None, budget_seconds=3)
+    assert store.exists(key) and first[0]["rescheduled"] == 2
+    assert seen == hashes[:2]
+    second = retry.apply_requests(store, [key], NOW, None, budget_seconds=3)
+    assert not store.exists(key) and second[0]["rescheduled"] == 2
+    assert seen == hashes
+
+
+def test_retry_reloads_capture_after_conflicting_completion(tmp_path: Path) -> None:
+    from .test_capture import HookStore
+
+    store = HookStore(tmp_path)
+    h = _retrying(store)
+
+    def finish(key: str, data: bytes) -> None:
+        if key != index_key(h):
+            return
+        store.before_put = None
+        rec = _record(store, PDF)
+        rec.status, rec.due, rec.capture = "ok", None, "captures/good/"
+        save(store, rec)
+
+    store.before_put = finish
+    assert not retry.reschedule(store, h, NOW)
+    assert _record(store, PDF).status == "ok"
+
+
+def test_retry_interrupted_due_publication_is_reconciled(tmp_path: Path) -> None:
+    from dea_capture.capture import reconcile
+
+    from .test_capture import HookStore
+
+    store = HookStore(tmp_path)
+    h = _retrying(store)
+
+    def interrupt(key: str, data: bytes) -> None:
+        if key.startswith("captures/due/"):
+            assert _record(store, PDF).due == key
+            store.before_put = None
+            raise OSError("interrupted retry")
+
+    store.before_put = interrupt
+    with pytest.raises(OSError, match="interrupted retry"):
+        retry.reschedule(store, h, NOW)
+    missing = _record(store, PDF).due
+    assert missing is not None and not store.exists(missing)
+    assert reconcile(store, [index_key(h)], NOW) == 1
+    rec = _record(store, PDF)
+    assert rec.due is not None and rec.due != missing and store.exists(rec.due)

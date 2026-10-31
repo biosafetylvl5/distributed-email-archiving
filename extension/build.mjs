@@ -37,7 +37,7 @@ function manifest(browser) {
     permissions: ["activeTab", "scripting", "storage", "contextMenus"],
     host_permissions: apiUrl ? [origin(apiUrl)] : [],
     // for an API address entered in the options instead
-    optional_host_permissions: ["https://*/*"],
+    optional_host_permissions: ["https://*/*", "http://localhost/*"],
   };
   if (browser === "firefox") {
     m.background = { scripts: ["background.js"] };

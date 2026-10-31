@@ -220,3 +220,68 @@ def test_the_issue_stage_queues_for_the_messages_subscription(tmp_path: Path) ->
     assert hashes
     for h in hashes:
         assert CaptureRecord.load(store.get(index_key(h)) or b"").subs == ["ana/a"]
+
+
+@pytest.mark.parametrize("release", ["raise", "remove", "unchanged"])
+@pytest.mark.parametrize("via", ["queue", "reconcile"])
+def test_existing_subscription_limit_changes_release_deferrals(
+    tmp_path: Path, release: str, via: str
+) -> None:
+    store = LocalStore(tmp_path)
+    _limits(store, ana__a=2 * MiB)
+    queue(store, URL, "page", T0, "ana/a")
+    run(store, _rec(store).due or "", _guarded(), now=T0, page_crawler=_crawler(3 * MiB))
+    _limits(
+        store, **({} if release == "remove" else {"ana__a": (4 if release == "raise" else 2) * MiB})
+    )
+    if via == "queue":
+        queue(store, URL, "page", T0, "ana/a")
+    else:
+        from dea_capture.capture import reconcile
+
+        reconcile(store, [index_key(_rec(store).h)], T0)
+    rec = _rec(store)
+    assert rec.status == ("deferred" if release == "unchanged" else "queued")
+    if release != "unchanged":
+        assert rec.due is not None and store.exists(rec.due)
+        assert (
+            run(store, rec.due, _guarded(), now=T0, page_crawler=_crawler(3 * MiB)).status == "ok"
+        )
+
+
+@pytest.mark.parametrize("representation", ["raw", "page"])
+def test_wayback_fallback_respects_subscription_limit(tmp_path: Path, representation: str) -> None:
+    from dea_capture.capture import capture_dir, wayback_url
+    from dea_capture.page import PageOutcome
+
+    from .test_capture import cdx_answer, cdx_api
+
+    store = LocalStore(tmp_path)
+    _limits(store, ana__a=1)
+    url = "https://example.org/report.pdf"
+    ts = "20261001000000"
+    raw = wayback_url(ts, url, "id_")
+    queue(store, url, "page" if representation == "page" else "direct", T0, "ana/a")
+    fallback = Web(
+        bodies={
+            cdx_api(url): ("application/json", cdx_answer(ts, url)),
+            raw: ("application/pdf", b"xx"),
+        }
+    )
+
+    def crawler(target: str) -> PageOutcome:
+        if target == url:
+            return PageOutcome("failed", 403)
+        return PageOutcome("ok", 200, files={"page.wacz": b"xx"})
+
+    result = run(
+        store,
+        _rec(store, url).due or "",
+        _web_guarded(Web(status={url: 403})),
+        now=T0,
+        wayback_fetcher=_web_guarded(fallback),
+        page_crawler=crawler,
+    )
+    rec = _rec(store, url)
+    assert result.status == "retrying" and rec.wayback is None
+    assert not store.listing(capture_dir(rec.h, T0))

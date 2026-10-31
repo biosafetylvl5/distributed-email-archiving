@@ -138,3 +138,31 @@ def test_css_urls_without_a_base_keeps_only_absolute() -> None:
         "@import 'rel.css'; .x{background:url(rel.png)} .y{background:url(https://abs.example.com/a.png)}"
     )
     assert (imports, assets) == ([], ["https://abs.example.com/a.png"])
+
+
+@pytest.mark.parametrize("attached_first", [True, False])
+def test_attached_message_cannot_shadow_outer_cid(attached_first: bool) -> None:
+    from email.message import EmailMessage
+
+    outer = EmailMessage()
+    outer.set_content('<img src="cid:logo">', subtype="html")
+    outer.add_related(b"outer", "image", "png", cid="<logo>")
+    nested = EmailMessage()
+    nested.set_content("attachment")
+    nested.add_related(b"SECRET-inner", "image", "png", cid="<logo>")
+    outer.add_attachment(nested)
+    if attached_first:
+        payload = outer.get_payload()
+        assert isinstance(payload, list)
+        outer.set_payload(list(reversed(payload)))
+    assert parse(outer.as_bytes()).cid_parts["logo"].data == b"outer"
+
+
+def test_duplicate_cid_uses_first_outer_part() -> None:
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg.set_content("body")
+    msg.add_related(b"first", "image", "png", cid="<logo>")
+    msg.add_related(b"second", "image", "png", cid="<logo>")
+    assert parse(msg.as_bytes()).cid_parts["logo"].data == b"first"

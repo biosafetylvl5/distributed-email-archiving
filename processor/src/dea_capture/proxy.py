@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import NoReturn
 from urllib.parse import urlsplit
 
+from .classify import normalized_host
 from .fetch import FetchError, HttpFetcher, TooLarge
 from .guard import (
     ForbiddenFetch,
@@ -44,6 +45,7 @@ from .guard import (
     IPNetwork,
     Resolver,
     check_destination,
+    check_link,
     system_resolver,
 )
 
@@ -381,14 +383,24 @@ class GuardProxy:
         target: str, header_lines: list[bytes],
     ) -> None:  # fmt: skip
         parts = urlsplit(target)
-        host = (parts.hostname or "").lower()
+        host = normalized_host(target)
         try:
             port = parts.port or 80
         except ValueError:
             port = 0
         if parts.scheme != "http" or not host or port != 80:
             await self._refuse(writer, host or "?", "plain http on port 80 only")
-        addresses = await self._check(writer, target, host)
+        # Plain HTTP exposes navigation URLs; HTTPS CONNECT traffic stays opaque.
+        try:
+            check_link(target)
+        except ForbiddenFetch:
+            await self._refuse(writer, host, "refused by the guard")
+        try:
+            addresses = await self._check(writer, target, host)
+        except FetchError:
+            self.stats.failed += 1
+            await self._reply(writer, 502, "cannot resolve")
+            return
         opened = await self._open(writer, addresses, self.http_port)
         if opened is None:
             return

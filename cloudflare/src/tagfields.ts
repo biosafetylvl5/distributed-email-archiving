@@ -20,6 +20,13 @@ export function isSignupUrl(value: string): boolean {
   }
 }
 
+// signup metadata keeps only the public page, never credentials or query tokens
+export function normalizeSignupUrl(value: string): string | null {
+  if (!isSignupUrl(value)) return null;
+  const u = new URL(value);
+  return u.origin + u.pathname;
+}
+
 export const cleanName = (v: string): string => v.trim().replace(/\s+/g, " ").slice(0, NAME_MAX);
 export const cleanDescription = (v: string): string =>
   v.trim().replace(/\r\n?/g, "\n").slice(0, DESCRIPTION_MAX);

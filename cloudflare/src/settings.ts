@@ -126,5 +126,14 @@ export function resolveSettings(
 // KV edge-caches reads for 60s, so dashboard changes take about a minute
 export async function loadOverrides(kv: KVNamespace | undefined): Promise<Overrides> {
   if (!kv) return {};
-  return sanitizeOverrides(await kv.get(SETTINGS_KEY, { type: "json", cacheTtl: 60 }));
+  const raw = await kv.get(SETTINGS_KEY, { type: "text", cacheTtl: 60 });
+  if (raw === null) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    if (err instanceof SyntaxError) return {};
+    throw err;
+  }
+  return sanitizeOverrides(parsed);
 }

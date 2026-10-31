@@ -151,13 +151,14 @@ def test_render_loads_nothing_from_elsewhere(tmp_path: Path) -> None:
         assert ref.startswith(("assets/", "css/", "#", "data:", "about:invalid",
                                "https://news.example.com/story")), ref  # fmt: skip
     assert f'src="assets/{A}.png"' in out and f'src="assets/{CID}.gif"' in out
-    assert f'href="css/{CSS}.css"' in out
+    css_name = next(iter(v.css))
+    assert f'href="css/{css_name}"' in out
     assert 'href="https://news.example.com/story" rel="noopener noreferrer" target="_blank"' in out
     assert 'title="Link removed: an unsubscribe link"' in out
     assert "srcset" not in out  # one candidate wasn't stored
     # the stylesheet points at the font next to it, nothing else
     font, nope = f'url("../assets/{FONT}.woff2")', 'url("about:invalid")'
-    assert v.css == {f"{CSS}.css": f"@font-face{{src:{font}}} .q{{background:{nope}}}".encode()}
+    assert v.css == {css_name: f"@font-face{{src:{font}}} .q{{background:{nope}}}".encode()}
     assert (
         v.removed["pixels"] == 1
         and v.removed["links_removed"] == 2
@@ -173,9 +174,18 @@ def test_render_loads_nothing_from_elsewhere(tmp_path: Path) -> None:
 def test_text_only_messages_are_escaped(tmp_path: Path) -> None:
     msg = EmailMessage()
     msg["Subject"] = "plain"
-    msg.set_content("<b>not bold</b> https://substack.com/redirect/abc?j=SECRET")
-    out = render(msg.as_bytes(), LocalStore(tmp_path), {"assets": []}, None).html.decode()
+    msg["To"] = "reader@example.org"
+    msg.set_content(
+        "<b>not bold</b> https://substack.com/redirect/abc?j=SECRET "
+        "https://example.com/article?token=SECRET&lang=en."
+    )
+    v = render(msg.as_bytes(), LocalStore(tmp_path), {"assets": []}, None)
+    out = v.html.decode()
     assert "&lt;b&gt;not bold&lt;/b&gt;" in out and "<a " not in out
+    assert "SECRET" not in out
+    assert "https://example.com/article?lang=en." in out
+    assert "to" not in v.meta["headers"]
+    assert "reader@example.org" not in json.dumps(v.meta)
 
 
 @pytest.mark.parametrize("path", EML_FIXTURES, ids=lambda p: p.stem)
@@ -212,3 +222,49 @@ def test_the_issue_stage_renders_the_view(path: Path, tmp_path: Path) -> None:
                           pacer=HostPacer(0), make_resolver=make)  # fmt: skip
     assert third.skipped and len(web.requested) == requested
     assert json.loads(store.get(manifest_key(sha)) or b"")["sha256"] == sha
+
+
+def test_srcset_candidates_with_shared_prefix(tmp_path: Path) -> None:
+    msg = EmailMessage()
+    url = "https://example.com/a.png"
+    msg.set_content(f'<img srcset="{url} 1x, {url}?v=2 2x">', subtype="html")
+    manifest = {
+        "assets": [
+            {"url": u, "status": "ok", "via": "img", "key": f"issues/x/assets/{name}.png"}
+            for u, name in [(url, A), (url + "?v=2", CID)]
+        ]
+    }
+    out = render(msg.as_bytes(), LocalStore(tmp_path), manifest, None).html.decode()
+    assert f'srcset="assets/{A}.png 1x, assets/{CID}.png 2x"' in out
+
+
+def test_identical_stylesheets_with_different_bases(tmp_path: Path) -> None:
+    from bs4 import BeautifulSoup
+
+    msg = EmailMessage()
+    urls = [f"https://example.com/{base}/site.css" for base in ("one", "two")]
+    msg.set_content(
+        "".join(f'<link rel="stylesheet" href="{url}">' for url in urls), subtype="html"
+    )
+    css_key = f"issues/x/assets/{CSS}.css"
+    store = LocalStore(tmp_path)
+    store.put(css_key, b".logo{background:url(logo.png)}", "text/css")
+    assets: list[dict[str, Any]] = []
+    for url, digest in zip(urls, [A, CID], strict=True):
+        assets.extend(
+            [
+                {"url": url, "status": "ok", "via": "stylesheet", "key": css_key},
+                {
+                    "url": url.replace("site.css", "logo.png"),
+                    "status": "ok",
+                    "via": "css",
+                    "key": f"issues/x/assets/{digest}.png",
+                },
+            ]
+        )
+    v = render(msg.as_bytes(), store, {"assets": assets}, None)
+    soup = BeautifulSoup(v.html, "html.parser")
+    names = [str(link.get("href")).removeprefix("css/") for link in soup.find_all("link")]
+    assert len(set(names)) == 2
+    for name, digest in zip(names, [A, CID], strict=True):
+        assert v.css[name] == f'.logo{{background:url("../assets/{digest}.png")}}'.encode()

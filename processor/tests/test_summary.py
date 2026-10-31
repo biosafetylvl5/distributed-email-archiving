@@ -257,3 +257,55 @@ def test_largest_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert files[2]["kind"] == "unknown" and "url" not in files[2]
     # the summary itself carries no URLs
     assert "video.example.com" not in (store.get(summary.SUMMARY_KEY) or b"").decode()
+
+
+def test_metadata_only_rewrite_invalidates_cache(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from dea_capture.store import Listed
+
+    class StableETagStore(CountingStore):
+        def listing(self, prefix: str) -> list[Listed]:
+            return [replace(o, etag="same-content") for o in super().listing(prefix)]
+
+    store = StableETagStore(tmp_path)
+    seed(store)
+    summary.build(store, now=lambda: NOW)
+    store.reads.clear()
+    key = f"captures/index/{1:064x}.json"
+    store.put(key, b"{}", "application/json", metadata={"kind": "page", "status": "ok"})
+    summary.build(store, now=lambda: NOW)
+    assert store.reads == [key]
+    assert load(store)["urls"]["byKind"] == {"page": {"ok": 2}, "media": {"ok": 1}}
+
+
+def test_precomputed_dashboard_aggregates(tmp_path: Path) -> None:
+    store = LocalStore(tmp_path)
+    seed(store)
+    summary.build(store, now=lambda: NOW)
+    aggregates = load(store)["aggregates"]
+    stats, captures = aggregates["stats"], aggregates["captures"]
+    assert stats["totals"] == {
+        "archive": {"count": 1, "bytes": 10},
+        "quarantine": {"count": 1, "bytes": 1},
+    }
+    assert stats["last7"] == stats["last30"] == {"archive": 1, "quarantine": 1}
+    assert len(stats["days"]) == 14
+    assert stats["tags"]["ann/news"]["archive"] == 1
+    assert stats["tags"]["bob/"]["quarantine"] == 1
+    assert stats["senders"] == [{"domain": "example.com", "count": 1}]
+    assert stats["oldestQuarantine"] == "2026-10-26"
+    assert captures["states"] == {"done": 1, "partial": 0, "pending": 0}
+    assert captures["linkStates"] == {"done": 0, "partial": 0, "pending": 1}
+    assert captures["totals"]["assets_ok"] == 3
+    assert captures["bySubscription"] == {"ann/news": {"done": 1, "partial": 0, "pending": 0}}
+    assert captures["messages"][0]["key"] == ARCHIVED
+    assert captures["messages"][0]["capture"]["source"] == ARCHIVED
+
+
+def test_worker_fixture_matches_processor_aggregates() -> None:
+    fixture = Path(__file__).parents[2] / "cloudflare/test/fixtures/processor-summary.ts"
+    doc = json.loads(fixture.read_text().removeprefix("export default ").rstrip().removesuffix(";"))
+    assert doc["aggregates"] == summary._aggregates(
+        doc["incoming"], doc["statuses"], datetime.fromisoformat(doc["generated_at"])
+    )

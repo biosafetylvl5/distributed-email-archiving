@@ -16,7 +16,14 @@ export type KeyFetcher = (teamDomain: string, refresh: boolean) => Promise<Acces
 
 const CLOCK_SKEW_S = 60;
 const KEY_CACHE_MS = 10 * 60 * 1000;
+const KEY_REFRESH_MS = 30 * 1000;
 let keyCache: { teamDomain: string; keys: AccessKey[]; fetchedAt: number } | null = null;
+let keyFetch: {
+  teamDomain: string;
+  startedAt: number;
+  pending: boolean;
+  promise: Promise<AccessKey[]>;
+} | null = null;
 
 export const fetchAccessKeys: KeyFetcher = async (teamDomain, refresh) => {
   if (
@@ -27,12 +34,32 @@ export const fetchAccessKeys: KeyFetcher = async (teamDomain, refresh) => {
   ) {
     return keyCache.keys;
   }
-  const res = await fetch(`https://${teamDomain}/cdn-cgi/access/certs`);
-  if (!res.ok) throw new Error(`access certs: HTTP ${res.status}`);
-  const body = (await res.json()) as { keys?: AccessKey[] };
-  const keys = body.keys ?? [];
-  keyCache = { teamDomain, keys, fetchedAt: Date.now() };
-  return keys;
+  // share in-flight requests and throttle refreshes, including failed attempts
+  if (
+    keyFetch?.teamDomain === teamDomain &&
+    (keyFetch.pending || Date.now() - keyFetch.startedAt < KEY_REFRESH_MS)
+  ) {
+    return keyFetch.promise;
+  }
+  const attempt = {
+    teamDomain,
+    startedAt: Date.now(),
+    pending: true,
+    promise: (async () => {
+      const res = await fetch(`https://${teamDomain}/cdn-cgi/access/certs`);
+      if (!res.ok) throw new Error(`access certs: HTTP ${res.status}`);
+      const body = (await res.json()) as { keys?: AccessKey[] };
+      const keys = body.keys ?? [];
+      keyCache = { teamDomain, keys, fetchedAt: Date.now() };
+      return keys;
+    })(),
+  };
+  keyFetch = attempt;
+  try {
+    return await attempt.promise;
+  } finally {
+    attempt.pending = false;
+  }
 };
 
 export function normalizeTeamDomain(v: string | undefined): string {

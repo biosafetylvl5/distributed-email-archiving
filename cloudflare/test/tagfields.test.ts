@@ -1,6 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { isValidTag } from "../src/policy";
-import { hostSlug, siteKey, slugify, suggestTag } from "../src/tagfields";
+import { hostSlug, normalizeSignupUrl, siteKey, slugify, suggestTag } from "../src/tagfields";
+
+describe("signup URL normalization", () => {
+  it("retains origin and path only, including ports and escaped path characters", () => {
+    expect(normalizeSignupUrl("https://reader%40example.com:SECRET@EXAMPLE.org:8443/join%20us?token=SECRET#SECRET"))
+      .toBe("https://example.org:8443/join%20us");
+    expect(normalizeSignupUrl("http://example.com")).toBe("http://example.com/");
+    const safe = "https://example.org/join";
+    expect(normalizeSignupUrl(normalizeSignupUrl(safe)!)).toBe(safe);
+  });
+
+  it("returns null for invalid, oversized or non-web URLs", () => {
+    for (const value of ["", "bad", "javascript:alert(1)", "mailto:reader@example.com", "https://example.org/" + "x".repeat(2048)]) {
+      expect(normalizeSignupUrl(value)).toBeNull();
+    }
+  });
+});
 
 describe("tag suggestions", () => {
   it("slugifies names", () => {

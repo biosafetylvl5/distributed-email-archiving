@@ -58,10 +58,69 @@ POST = "https://example.substack.com/p/hello"
             "https://x.us1.list-manage.com/vcard?u=1&id=2",
         ),
         ("https://www.example.org/x?e=keep", "https://www.example.org/x?e=keep"),
+        ("https://MAILCHI.MP./example?e=SECRET", "https://mailchi.mp/example"),
     ],
 )
 def test_canonicalize(url: str, expected: str) -> None:
     assert canonicalize(url) == expected
+
+
+@pytest.mark.parametrize("host", ["substack.com.", "SUBSTACK.COM."])
+def test_trailing_dot_hosts_use_the_same_rules(host: str) -> None:
+    url = f"https://{host}/redirect/abc?j=SECRET"
+    assert tracking_vendor(url) == "substack"
+    assert classify(url).decision == Decision.RESOLVE
+    assert canonicalize(f"https://{host}/p/post?r=SECRET&action=share") == (
+        "https://substack.com/p/post"
+    )
+    target = POST + "?token=SECRET"
+    c = classify(f"https://{host}/redirect/2/{_jwt({'e': target})}")
+    assert c.fetch_url == POST
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://example.org:bad/article", "https://example.org:99999/", "https://[broken/"],
+)
+def test_malformed_urls_are_skipped(url: str) -> None:
+    c = classify(url)
+    assert c.decision == Decision.SKIP
+    assert c.canonical is c.fetch_url is None
+    assert c.reason == "invalid URL"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "reader%40example.com",
+        "https%3A%2F%2Fexample.org%2Freader%40example.com",
+        "https%253A%252F%252Fexample.org%252Freader%2540example.com",
+    ],
+)
+def test_nested_mailbox_query_values_are_stripped(value: str) -> None:
+    from dea_capture.classify import has_auth_param
+
+    url = f"https://example.org/post?return={value}&keep=1"
+    assert has_auth_param(url)
+    c = classify(url)
+    assert c.canonical == c.fetch_url == "https://example.org/post?keep=1"
+
+
+@pytest.mark.parametrize("path", ["reader%40example.com", "reader%2540example.com"])
+def test_mailbox_paths_have_no_canonical(path: str) -> None:
+    url = f"https://example.org/news/{path}"
+    c = classify(url)
+    assert c.decision == Decision.SKIP
+    assert c.canonical is c.fetch_url is None
+    with pytest.raises(ValueError, match="email address in URL path"):
+        canonicalize(url)
+    target = classify(f"https://substack.com/redirect/2/{_jwt({'e': url})}")
+    assert target.decision == Decision.SKIP
+
+
+def test_action_reason_never_contains_the_parameter_value() -> None:
+    c = classify("https://example.org/do?action=confirm_SECRET_reader%40example.com")
+    assert c.reason == "parameter 'action'"
 
 
 def test_decode_substack_v2() -> None:
@@ -92,6 +151,8 @@ def test_decode_only_on_substack() -> None:
     ("url", "vendor"),
     [
         ("https://substack.com/redirect/abc?j=1", "substack"),
+        ("https://us1.list-manage.com./track/click?u=SECRET", "mailchimp"),
+        ("https://u1.ct.sendgrid.net./ls/click?upn=SECRET", "sendgrid"),
         ("https://x.us1.list-manage.com/track/click?u=1", "mailchimp"),
         ("https://us1.list-manage.com/CvccQjEdTpH?e=1&c2id=2&m=3", "mailchimp"),
         ("https://us1.list-manage.com/d4AELPnCtuj", "mailchimp"),
@@ -121,6 +182,7 @@ def test_tracking_vendor(url: str, vendor: str | None) -> None:
         ("https:///nohost", "", LinkClass.NON_WEB),
         ("https://x.us1.list-manage.com/unsubscribe?u=1", "", LinkClass.UNSUBSCRIBE),
         ("https://x.us1.list-manage.com/profile?u=1", "", LinkClass.UNSUBSCRIBE),
+        ("https://x.us1.list-manage.com./profile?u=SECRET", "", LinkClass.UNSUBSCRIBE),
         ("https://x.substack.com/action/disable_email?token=t", "", LinkClass.UNSUBSCRIBE),
         ("https://x.activehosted.com/proc.php?s=1&act=unsub", "Click here", LinkClass.UNSUBSCRIBE),
         ("https://example.org/email-preferences", "", LinkClass.UNSUBSCRIBE),

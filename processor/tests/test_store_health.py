@@ -118,3 +118,96 @@ def test_health_fresh_and_stale() -> None:
 def test_health_without_a_scan_is_unhealthy() -> None:
     ok, why = health.check("courier_service_uptime_seconds 5\n", 900, now=0)
     assert not ok and "no " in why
+
+
+def test_local_store_conditional_overwrite_and_metadata_reset(tmp_path: Path) -> None:
+    store = LocalStore(tmp_path)
+    store.put("k", b"first", "text/plain", metadata={"old": "value"})
+    got = store.get_with_etag("k")
+    assert got is not None
+    assert store.put("k", b"second", "text/plain", if_match=got[1])
+    assert not store.put("k", b"stale", "text/plain", if_match=got[1])
+    assert store.get("k") == b"second"
+    assert store.metadata("k") == {}
+    assert not store.put("missing", b"x", "text/plain", if_match=got[1])
+
+
+def test_s3_get_etag_and_conditional_overwrite() -> None:
+    import io
+
+    store = _s3()
+    with Stubber(store.client) as stub:
+        stub.add_response(
+            "get_object",
+            {"Body": io.BytesIO(b"first"), "ETag": '"version"'},
+            {"Bucket": "bucket", "Key": "k"},
+        )
+        expected = {
+            "Bucket": "bucket",
+            "Key": "k",
+            "Body": b"second",
+            "ContentType": "text/plain",
+            "IfMatch": '"version"',
+        }
+        stub.add_response("put_object", {}, expected)
+        stub.add_client_error(
+            "put_object", "PreconditionFailed", http_status_code=412, expected_params=expected
+        )
+        assert store.get_with_etag("k") == (b"first", '"version"')
+        assert store.put("k", b"second", "text/plain", if_match='"version"')
+        assert not store.put("k", b"second", "text/plain", if_match='"version"')
+
+
+def test_local_store_compare_and_swap_serializes_independent_writers(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    LocalStore(tmp_path).put("index", b"before", "text/plain")
+    ready = Barrier(2)
+
+    def writer(value: bytes) -> bool:
+        store = LocalStore(tmp_path)
+        got = store.get_with_etag("index")
+        assert got is not None
+        ready.wait(timeout=5)
+        return store.put("index", value, "text/plain", if_match=got[1])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(writer, [b"first", b"second"]))
+    assert sorted(outcomes) == [False, True]
+    assert LocalStore(tmp_path).get("index") in {b"first", b"second"}
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+def test_local_overwrite_without_metadata_clears_old_metadata(
+    tmp_path: Path, streamed: bool
+) -> None:
+    store = LocalStore(tmp_path / "store")
+    store.put("k", b"old", "text/plain", metadata={"old": "value"})
+    if streamed:
+        source = tmp_path / "source"
+        source.write_bytes(b"new")
+        store.put_file("k", source, "text/plain")
+    else:
+        store.put("k", b"new", "text/plain")
+    assert store.metadata("k") == {} and store.get("k") == b"new"
+
+
+def test_health_requires_every_expected_monitor() -> None:
+    assert not health.check(METRICS, 900, now=1.7615e9 + 60, expected_monitors=2)[0]
+    zero = METRICS + "\n" + health.SCAN_METRIC + '{monitor_identifier="other"} 0\n'
+    assert not health.check(zero, 900, now=1.7615e9 + 60)[0]
+    assert not health.check(zero, 900, now=1.7615e9 + 60, expected_monitors=2)[0]
+    both = zero.replace("} 0\n", "} 1761500000\n")
+    assert health.check(both, 900, now=1.7615e9 + 60, expected_monitors=2)[0]
+
+
+def test_health_startup_grace_ends_without_all_samples() -> None:
+    metrics = METRICS.replace("99.0", "5.0")
+    assert health.check(metrics, 900, expected_monitors=2, startup_grace=30)[0]
+    assert not health.check(METRICS, 900, expected_monitors=2, startup_grace=30)[0]
+
+
+def test_health_zero_sample_is_unhealthy() -> None:
+    zero = METRICS + "\n" + health.SCAN_METRIC + '{monitor_identifier="other"} 0\n'
+    assert not health.check(zero, 900, now=1.7615e9 + 60)[0]

@@ -34,10 +34,10 @@ from .capture import (
     KINDS,
     LEASE,
     CaptureRecord,
-    due_key,
-    index_key,
+    fresh_due,
     parse_due_key,
-    save,
+    publish_due,
+    update,
 )
 from .issue import status_key
 from .links import Relinked, load_links
@@ -63,24 +63,27 @@ def _iso(d: datetime) -> str:
 
 def reschedule(store: Store, h: str, now: datetime) -> bool:
     """Make a ``retrying`` or ``failed`` URL due now; False if left alone."""
-    data = store.get(index_key(h))
-    if data is None:
-        return False
-    rec = CaptureRecord.load(data)
-    if rec.status not in RETRYABLE:
-        return False
-    old = rec.due
-    if old is not None:
-        try:
-            _, when, _ = parse_due_key(old)
-        except ValueError:
+    old: str | None = None
+
+    def change(rec: CaptureRecord) -> bool:
+        nonlocal old
+        if rec.status not in RETRYABLE:
             return False
-        if when - now <= LEASE[rec.kind]:
-            return False
-    rec.status, rec.due = "retrying", due_key(rec.kind, now, h)
-    # the record first: a due key whose record doesn't name it is dropped as stale
-    save(store, rec)
-    put_json(store, rec.due, {"h": h, "kind": rec.kind})
+        old = rec.due
+        if old is not None:
+            try:
+                _, when, _ = parse_due_key(old)
+            except ValueError:
+                return False
+            if when - now <= LEASE[rec.kind]:
+                return False
+        rec.status, rec.due = "retrying", fresh_due(rec.kind, now, h)
+        return True
+
+    rec = update(store, h, change)
+    if rec is None:
+        return False
+    publish_due(store, rec)
     if old is not None:
         store.delete(old)
     return True
@@ -110,7 +113,7 @@ def _validate(req: Any) -> str | None:
 
 def _apply_message(
     store: Store, sha: str, now: datetime, relink: Relinker | None, deadline: float,
-    result: dict[str, Any],
+    result: dict[str, Any], after: str = "",
 ) -> bool:  # fmt: skip
     """Returns False if it ran out of time and should be tried again."""
     status = store.get(status_key(sha))
@@ -126,20 +129,37 @@ def _apply_message(
             return False
     doc = load_links(store, sha) or {}
     hashes = sorted({str(r["h"]) for r in doc.get("links", []) if r.get("h")})
-    done = sum(reschedule(store, h, now) for h in hashes)
-    result["rescheduled"], result["left"] = done, len(hashes) - done
-    return True
+    return _apply_hashes(store, hashes, now, deadline, result, after)
 
 
-def _apply_urls(store: Store, kind: str, status: str, now: datetime,
-                result: dict[str, Any]) -> None:  # fmt: skip
+def _apply_urls(store: Store, kind: str, status: str, now: datetime, deadline: float,
+                result: dict[str, Any], after: str = "") -> bool:  # fmt: skip
     hashes = [
         key.removeprefix("captures/index/").removesuffix(".json")
         for key, (_, meta) in _index_cache(store).items()
         if meta.get("kind") == kind and meta.get("status") == status
     ]
-    done = sum(reschedule(store, h, now) for h in hashes)
+    return _apply_hashes(store, hashes, now, deadline, result, after)
+
+
+def _apply_hashes(
+    store: Store,
+    hashes: list[str],
+    now: datetime,
+    deadline: float,
+    result: dict[str, Any],
+    after: str,
+) -> bool:
+    hashes = sorted(h for h in hashes if h > after)
+    done = 0
+    for h in hashes:
+        if time.monotonic() >= deadline:
+            result["rescheduled"], result["left"] = done, len(hashes) - done
+            return False
+        done += reschedule(store, h, now)
+        result["_after"] = h
     result["rescheduled"], result["left"] = done, len(hashes) - done
+    return True
 
 
 def apply_requests(
@@ -170,11 +190,24 @@ def apply_requests(
             result.update({k: req[k] for k in ("scope", "sha", "kind", "status", "requested_at")
                            if k in req})  # fmt: skip
             if req["scope"] == "message":
-                finished = _apply_message(store, req["sha"], now, relink, deadline, result)
+                finished = _apply_message(
+                    store, req["sha"], now, relink, deadline, result, str(req.get("_after", ""))
+                )
             else:
-                _apply_urls(store, req["kind"], req["status"], now, result)
+                finished = _apply_urls(
+                    store,
+                    req["kind"],
+                    req["status"],
+                    now,
+                    deadline,
+                    result,
+                    str(req.get("_after", "")),
+                )
+        after = result.pop("_after", None)
         if finished:
             store.delete(key)
+        elif after is not None:
+            put_json(store, key, {**req, "_after": after})
         results.append(result)
     if results:
         try:

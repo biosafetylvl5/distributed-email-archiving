@@ -9,6 +9,10 @@ checks) and in the ``Host`` header. It never follows redirects itself:
 
 from __future__ import annotations
 
+import contextlib
+import http.client
+import socket
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -17,17 +21,14 @@ from urllib.parse import urljoin, urlsplit
 import urllib3
 
 from . import __version__
-from .guard import ForbiddenFetch, GuardedFetcher, IPAddress, Purpose, Response
+from .classify import normalized_host
+from .guard import FetchError, ForbiddenFetch, GuardedFetcher, IPAddress, Purpose, Response
 
 DEFAULT_USER_AGENT = (
     f"dea-capture/{__version__} (newsletter archive; "
     "+https://github.com/biosafetylvl5/distributed-email-archiving)"
 )
 REDIRECTS = frozenset({301, 302, 303, 307, 308})
-
-
-class FetchError(Exception):
-    """A request that failed in a way worth retrying later."""
 
 
 class TooLarge(Exception):
@@ -53,7 +54,7 @@ class HttpFetcher:
 
     def get(self, url: str, *, addresses: Sequence[IPAddress]) -> Response:
         parts = urlsplit(url)
-        host = parts.hostname or ""
+        host = normalized_host(url)
         https = parts.scheme.lower() == "https"
         port = parts.port or (443 if https else 80)
         default_port = port == (443 if https else 80)
@@ -62,49 +63,60 @@ class HttpFetcher:
             host_header = f"[{host}]" if default_port else f"[{host}]:{port}"
         target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
         headers = {"Host": host_header, "User-Agent": self.user_agent, "Accept": "*/*"}
-        timeout = urllib3.Timeout(connect=self.connect_timeout, read=self.total_timeout)
-
+        deadline = time.monotonic() + self.total_timeout
         errors: list[str] = []
         for addr in addresses:
-            pool: urllib3.HTTPConnectionPool
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise FetchError("response took too long")
+            conn: urllib3.connection.HTTPConnection
+            timeout = min(self.connect_timeout, remaining)
             if https and self._https:
-                pool = urllib3.HTTPSConnectionPool(
-                    str(addr), port, timeout=timeout, retries=False, maxsize=1,
+                conn = urllib3.connection.HTTPSConnection(
+                    str(addr), port, timeout=timeout,
                     server_hostname=host, assert_hostname=host, cert_reqs="CERT_REQUIRED",
                 )  # fmt: skip
             else:
-                pool = urllib3.HTTPConnectionPool(
-                    str(addr), port, timeout=timeout, retries=False, maxsize=1
+                conn = urllib3.connection.HTTPConnection(str(addr), port, timeout=timeout)
+            timer: threading.Timer | None = None
+            resp: urllib3.HTTPResponse | None = None
+            try:
+                conn.connect()
+                assert conn.sock is not None
+                conn.timeout = max(0.001, deadline - time.monotonic())
+                conn.sock.settimeout(conn.timeout)
+                # Interrupt blocked header/body reads too, even when bytes keep arriving.
+                timer = threading.Timer(
+                    max(0, deadline - time.monotonic()), _interrupt, args=(conn.sock,)
                 )
-            try:
-                resp = pool.urlopen(
-                    "GET", target, headers=headers, redirect=False,
-                    preload_content=False, assert_same_host=False,
+                timer.daemon = True
+                timer.start()
+                conn.request("GET", target, headers=headers, preload_content=False)
+                resp = conn.getresponse()
+                body = self._read(resp, deadline)
+                if time.monotonic() >= deadline:
+                    raise FetchError("response took too long")
+                return Response(
+                    url=url, status=resp.status,
+                    headers={k.lower(): v for k, v in resp.headers.items()}, body=body,
                 )  # fmt: skip
-            except urllib3.exceptions.HTTPError as exc:
+            except (urllib3.exceptions.HTTPError, http.client.HTTPException, OSError) as exc:
                 errors.append(f"{addr}: {type(exc).__name__}")
-                pool.close()
-                continue
-            try:
-                body = self._read(resp)
             finally:
-                resp.release_conn()
-                pool.close()
-            return Response(
-                url=url,
-                status=resp.status,
-                headers={k.lower(): v for k, v in resp.headers.items()},
-                body=body,
-            )
+                if timer is not None:
+                    timer.cancel()
+                    timer.join()
+                if resp is not None:
+                    resp.close()
+                conn.close()
         raise FetchError("; ".join(errors) or "no addresses")
 
-    def _read(self, resp: urllib3.BaseHTTPResponse) -> bytes:
+    def _read(self, resp: urllib3.BaseHTTPResponse, deadline: float) -> bytes:
         if self.truncate and self.max_bytes == 0:
             return b""
         declared = resp.headers.get("content-length", "")
         if not self.truncate and declared.isdigit() and int(declared) > self.max_bytes:
             raise TooLarge(self.max_bytes)
-        deadline = time.monotonic() + self.total_timeout
         chunks: list[bytes] = []
         size = 0
         try:
@@ -121,6 +133,11 @@ class HttpFetcher:
         except urllib3.exceptions.HTTPError as exc:
             raise FetchError(f"reading body: {type(exc).__name__}") from exc
         return b"".join(chunks)
+
+
+def _interrupt(sock: socket.socket) -> None:
+    with contextlib.suppress(OSError):
+        sock.shutdown(socket.SHUT_RDWR)
 
 
 @dataclass(frozen=True)
@@ -161,7 +178,7 @@ class HostPacer:
         self._last: dict[str, float] = {}
 
     def wait(self, url: str) -> None:
-        host = (urlsplit(url).hostname or "").lower()
+        host = normalized_host(url)
         last = self._last.get(host)
         now = time.monotonic()
         if last is not None and now - last < self.interval:

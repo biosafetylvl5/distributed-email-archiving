@@ -12,7 +12,7 @@ import { getTag, listTags, putTag } from "../admin/store";
 import type { Env } from "../env";
 import { isValidTag, type TagRecord, type UserRecord } from "../policy";
 import { loadOverrides, resolveSettings, type Settings } from "../settings";
-import { cleanDescription, cleanName, cleanNote, isSignupUrl, siteKey, suggestTag } from "../tagfields";
+import { cleanDescription, cleanName, cleanNote, isSignupUrl, normalizeSignupUrl, siteKey, suggestTag } from "../tagfields";
 import { tokenUser } from "./tokens";
 
 const HEADERS = {
@@ -36,7 +36,7 @@ const ADMIN_ONLY = new Set([
 const CLEAN: Record<Editable, (v: string) => string> = {
   name: cleanName,
   description: cleanDescription,
-  signup_url: (v) => v.trim(),
+  signup_url: (v) => normalizeSignupUrl(v.trim()) ?? v.trim(),
   user_note: cleanNote,
 };
 
@@ -78,7 +78,7 @@ export function publicTag(env: Env, user: string, tag: string, r: TagRecord) {
     status: r.status,
     name: r.name ?? null,
     description: r.description ?? null,
-    signup_url: r.signup_url ?? null,
+    signup_url: r.signup_url ? normalizeSignupUrl(r.signup_url) : null,
     user_note: r.user_note ?? null,
     sender_domain: r.sender_domain ?? null,
     capture_limit_mb: r.capture_limit_mb ?? null,
@@ -124,8 +124,28 @@ async function readBody(request: Request): Promise<Body | Response> {
   if (!/^application\/json\b/i.test(request.headers.get("content-type") ?? "")) {
     return error(415, "unsupported_media_type", "send application/json");
   }
-  const text = await request.text();
-  if (text.length > BODY_MAX) return error(413, "too_large", `bodies are limited to ${BODY_MAX} bytes`);
+  const tooLarge = () => error(413, "too_large", `bodies are limited to ${BODY_MAX} bytes`);
+  if (Number(request.headers.get("content-length")) > BODY_MAX) return tooLarge();
+  const bytes = new Uint8Array(BODY_MAX);
+  let size = 0;
+  const reader = request.body?.getReader();
+  if (reader) {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (size + value.byteLength > BODY_MAX) {
+          await reader.cancel();
+          return tooLarge();
+        }
+        bytes.set(value, size);
+        size += value.byteLength;
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+  const text = new TextDecoder().decode(bytes.subarray(0, size));
   let body: unknown;
   try {
     body = JSON.parse(text);
@@ -209,6 +229,13 @@ async function list(ctx: Ctx): Promise<Response> {
 // most of other users' matches a lookup returns
 const OTHERS_MAX = 10;
 
+function otherName(name?: string): string {
+  const label = cleanName(name ?? "");
+  return !label || /@|[a-z][a-z0-9+.-]*:\/\/|\b(?:[a-z0-9-]+\.)+[a-z]{2,63}\b/i.test(label)
+    ? "Another subscription"
+    : label;
+}
+
 // the user's subscriptions whose sign-up link is this page, or on this site;
 // and, as `others`, other users' (so a newsletter isn't archived twice), with
 // only the name, status and how it matched: never whose they are
@@ -220,6 +247,7 @@ async function lookup(ctx: Ctx): Promise<Response> {
   const exact: ReturnType<typeof publicTag>[] = [];
   const sameSite: ReturnType<typeof publicTag>[] = [];
   const others = new Map<string, { name: string; status: string; match: Match }>();
+  // A full scan is acceptable for this small archive with a handful of trusted users.
   for (const t of await listTags(env)) {
     if (!t.record?.signup_url) continue;
     const k = siteKey(t.record.signup_url);
@@ -228,7 +256,7 @@ async function lookup(ctx: Ctx): Promise<Response> {
     if (t.user === caller.user) {
       (match === "page" ? exact : sameSite).push(publicTag(env, t.user, t.tag, t.record));
     } else {
-      const other = { name: t.record.name || t.tag, status: t.record.status, match };
+      const other = { name: otherName(t.record.name), status: t.record.status, match };
       others.set(JSON.stringify(other), other);
     }
   }
@@ -262,7 +290,7 @@ async function create(ctx: Ctx): Promise<Response> {
   let tag: string;
   if (body.tag !== undefined && body.tag !== null && body.tag !== "") {
     tag = typeof body.tag === "string" ? body.tag.trim().toLowerCase() : "";
-    if (!isValidTag(tag)) {
+    if (!isValidTag(tag, caller.user)) {
       return error(422, "invalid", "tag must be 1-63 of a-z, 0-9, '.', '_' or '-', starting with a letter or digit", { field: "tag" });
     } // prettier-ignore
     const existing = await getTag(env, caller.user, tag);
@@ -271,12 +299,12 @@ async function create(ctx: Ctx): Promise<Response> {
     }
   } else {
     const base = suggestTag(fields.name, fields.signup_url);
-    if (!base || !isValidTag(base)) {
+    if (!base || !isValidTag(base, caller.user)) {
       return error(422, "invalid", "give a tag, or a name or sign-up link to make one from", { field: "tag" });
     }
     const taken = new Set(tags.map((t) => t.tag));
     const free = [base, ...Array.from({ length: DERIVED_TRIES - 1 }, (_, i) => `${base}-${i + 2}`)].find(
-      (t) => !taken.has(t) && isValidTag(t),
+      (t) => !taken.has(t) && isValidTag(t, caller.user),
     );
     // the list can lag a recent write: confirm the one we picked
     if (!free || (await getTag(env, caller.user, free))) {
@@ -293,6 +321,11 @@ async function create(ctx: Ctx): Promise<Response> {
     updated_at: now.toISOString(),
   };
   apply(record, fields);
+  // KV has no compare-and-set: stale reads or writes after this check can still race.
+  const existing = await getTag(env, caller.user, tag);
+  if (existing) {
+    return error(409, "exists", `you already have ${tag}`, { subscription: publicTag(env, caller.user, tag, existing) });
+  }
   await putTag(env, caller.user, tag, record);
   await bump(env, "new", caller.user, now);
   console.log(JSON.stringify({ evt: "api_tag_created", user: caller.user, tag, token: caller.tokenId, status: record.status }));
@@ -321,16 +354,25 @@ async function update(ctx: Ctx, tag: string): Promise<Response> {
     });
   }
   const now = new Date();
-  if (!apply(record, fields)) return json(200, { subscription: publicTag(env, caller.user, tag, record) });
+  if (!apply({ ...record }, fields)) return json(200, { subscription: publicTag(env, caller.user, tag, record) });
   if ((await counted(env, "edit", caller.user, now)) >= EDITS_PER_DAY) {
     return error(429, "daily_limit", `you can make ${EDITS_PER_DAY} edits a day; try again tomorrow (UTC)`, {}, {
       "retry-after": untilMidnight(now),
     });
   }
-  record.updated_at = now.toISOString();
-  await putTag(env, caller.user, tag, record);
+  const fresh = await getTag(env, caller.user, tag);
+  if (!fresh) return error(404, "not_found", `no subscription ${tag}`);
+  if ((fresh.updated_at ?? null) !== (record.updated_at ?? null)) {
+    return error(409, "conflict", "it changed since you loaded it; reload and try again", {
+      subscription: publicTag(env, caller.user, tag, fresh),
+    });
+  }
+  // Merge into the fresh record; KV still has a race between this read and write.
+  apply(fresh, fields);
+  fresh.updated_at = now.toISOString();
+  await putTag(env, caller.user, tag, fresh);
   await bump(env, "edit", caller.user, now);
-  return json(200, { subscription: publicTag(env, caller.user, tag, record) });
+  return json(200, { subscription: publicTag(env, caller.user, tag, fresh) });
 }
 
 function methods(method: string, allowed: Record<string, () => Promise<Response>>): Promise<Response> | Response {
@@ -348,7 +390,7 @@ async function route(ctx: Ctx, path: string): Promise<Response> {
   const m = /^\/v1\/subscriptions\/([^/]+)$/.exec(path);
   if (m) {
     const tag = decodeURIComponent(m[1]).toLowerCase();
-    if (!isValidTag(tag)) return error(404, "not_found", `no subscription ${tag}`);
+    if (!isValidTag(tag, ctx.caller.user)) return error(404, "not_found", `no subscription ${tag}`);
     return methods(method, { GET: () => show(ctx, tag), PATCH: () => update(ctx, tag) });
   }
   return error(404, "not_found", "no such endpoint");

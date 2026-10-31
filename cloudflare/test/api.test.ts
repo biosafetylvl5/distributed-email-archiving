@@ -69,6 +69,31 @@ describe("tokens", () => {
     expect(tokens.data.size).toBe(0);
   });
 
+  it("doesn't resurrect a revoked token after a stale authentication read", async () => {
+    const { env, tokens, token, id } = await seeded();
+    const get = tokens.get.bind(tokens);
+    let release!: () => void;
+    let read!: () => void;
+    const paused = new Promise<void>((resolve) => { read = resolve; });
+    const resume = new Promise<void>((resolve) => { release = resolve; });
+    tokens.get = async (key, opts) => {
+      const value = await get(key, opts);
+      if (key.startsWith("t:")) {
+        read();
+        await resume;
+      }
+      return value;
+    };
+    const pending = tokenUser(env, token);
+    await paused;
+    await revokeToken(env, "ann", id);
+    release();
+    expect(await pending).toMatchObject({ user: "ann", id });
+    expect([...tokens.data.keys()].filter((k) => k.startsWith("t:"))).toEqual([]);
+    expect(await tokenUser(env, token)).toBeNull();
+    expect(await listTokens(env, "ann")).toEqual([]);
+  });
+
   it("marks a token used at most once a day", async () => {
     const { env, tokens, token } = await seeded();
     let writes = 0;
@@ -218,7 +243,7 @@ describe("adding subscriptions", () => {
     const s = await sub(r);
     expect(s).toMatchObject({
       tag: "cafe-weekly", status: "approved", name: "Café Weekly", description: "Coffee\nnews",
-      signup_url: "https://www.cafe.example.com/signup?ref=x", user_note: "from the footer", source: "api",
+      signup_url: "https://www.cafe.example.com/signup", user_note: "from the footer", source: "api",
     }); // prettier-ignore
     expect(s.addresses.plus).toBe("ann+cafe-weekly@mail.example.org");
     expect(tags.json("ann/cafe-weekly")).toMatchObject({ source: "api", created_by: `token:${id}` });
@@ -355,7 +380,7 @@ describe("lookup", () => {
     const body = (await r.json()) as { others: unknown[] };
     expect(body.others).toEqual([
       { name: "Ramen Weekly", status: "approved", match: "page" },
-      { name: "broth", status: "blocked", match: "site" },
+      { name: "Another subscription", status: "blocked", match: "site" },
     ]);
     expect(JSON.stringify(body)).not.toMatch(/bob|cy|secret|mine/);
   });

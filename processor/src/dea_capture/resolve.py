@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 from urllib.parse import urljoin
 
-from .classify import canonicalize, has_auth_param, tracking_vendor
+from .classify import canonicalize, has_auth_param, has_email_path, tracking_vendor
 from .fetch import REDIRECTS, FetchError, HostPacer
 from .guard import ForbiddenFetch, GuardedFetcher
 
@@ -72,6 +72,8 @@ def resolve(
     chain = [href]
     for hop in range(max_hops + 1):
         url = chain[-1]
+        if has_email_path(url):
+            return Resolution("refused", chain, error="email address in URL path")
         if hop and has_auth_param(url):
             return Resolution(
                 "ok", chain, url, canonicalize(url), stopped_at_auth=True,

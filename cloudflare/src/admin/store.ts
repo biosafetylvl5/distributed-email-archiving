@@ -29,11 +29,7 @@ export async function listAllKeys(kv: KVNamespace, prefix?: string): Promise<str
 }
 
 async function getJson<T>(kv: KVNamespace, key: string): Promise<T | null> {
-  try {
-    return await kv.get<T>(key, "json");
-  } catch {
-    return null; // unparseable value: show it as broken rather than failing the page
-  }
+  return kv.get<T>(key, "json");
 }
 
 export async function listUsers(env: Env): Promise<UserEntry[]> {

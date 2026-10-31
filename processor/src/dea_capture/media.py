@@ -11,8 +11,8 @@ else; from it:
   deferred without downloading.
 
 The second run downloads the formats the first one chose (best up to 1080p, MP4 if it can),
-using yt-dlp's own downloader for every protocol, so ffmpeg only merges files
-on disk and never fetches anything itself.
+preferring yt-dlp's own downloader. ffmpeg is restricted to local protocols,
+so unsupported network-download fallbacks fail closed.
 
 Stored in the attempt's folder under ``captures/<h[:2]>/<h>/<stamp>/``:
 ``media.<ext>``, ``thumbnail.<ext>`` when there is one, ``info.json`` (the
@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -40,7 +41,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from . import __version__
-from .guard import ForbiddenFetch, IPNetwork, check_destination, check_link
+from .classify import canonicalize
+from .guard import FetchError, ForbiddenFetch, IPNetwork, check_destination, check_link
 from .page import _become_subreaper, _end_group
 from .proxy import GuardProxy, ProxyStats
 from .store import Store, put_json
@@ -126,8 +128,10 @@ def ytdlp_args(
         return [*common, "--flat-playlist", "-J", url]
     return [
         *common, "--load-info-json", str(workdir / "probe.json"),
-        # yt-dlp fetches every protocol itself; ffmpeg only merges
+        # ffmpeg fallback must fail closed; local merges still work.
         "--downloader", "native", "--max-filesize", str(max_bytes),
+        "--downloader-args", "ffmpeg_i:-protocol_whitelist file,pipe,crypto",
+        "--postprocessor-args", "ffmpeg_i:-protocol_whitelist file,pipe,crypto",
         "--retries", "5", "--fragment-retries", "10",
         "--merge-output-format", "mp4/mkv", "--write-thumbnail", "--no-mtime",
         "-P", str(workdir / "out"), "-P", f"temp:{workdir / 'part'}",
@@ -156,14 +160,17 @@ def _run(
             env=_env(workdir), start_new_session=True,
         )  # fmt: skip
         code: int | None = None
-        while (left := deadline - time.monotonic()) > 0:
-            try:
-                code = proc.wait(min(left, 2.0) if stop else left)
-                break
-            except subprocess.TimeoutExpired:
-                if stop and stop():
+        try:
+            while (left := deadline - time.monotonic()) > 0:
+                try:
+                    code = proc.wait(min(left, 2.0) if stop else left)
                     break
-        _end_group(proc.pid)
+                except subprocess.TimeoutExpired:
+                    if stop and stop():
+                        break
+        finally:
+            _end_group(proc.pid)
+
     return code
 
 
@@ -178,6 +185,21 @@ def _last_error(workdir: Path, log: str, pattern: re.Pattern[str] = _ERROR) -> s
     except OSError:
         return None
     return _URL.sub("<url>", found[-1])[:300] if found else None
+
+
+def _size(folder: Path) -> int:
+    size = 0
+    for path in folder.rglob("*"):
+        try:
+            got = path.stat()
+        except FileNotFoundError:
+            continue  # the downloader can rename parts while we measure
+        if stat.S_ISREG(got.st_mode):
+            size += got.st_size
+    return size
+
+
+_SIZE_ABORT = re.compile(r"File is larger than max-filesize \(\d+ bytes > \d+ bytes\)\. Aborting\.")
 
 
 def run_ytdlp(url: str, workdir: Path, proxy: GuardProxy, limit: int | None = None) -> Grab:
@@ -200,13 +222,36 @@ def run_ytdlp(url: str, workdir: Path, proxy: GuardProxy, limit: int | None = No
         if verdict:
             return Grab(info, verdict, exit_code=code, stats=proxy.stats)
         cap = size_cap(MAX_BYTES, limit)[0]
-        code = _run(ytdlp_args(url, workdir, port, probe=False, max_bytes=cap), workdir,
-                    "download.log", DOWNLOAD_TIMEOUT, None)  # fmt: skip
+        over_cap = False
+
+        def stop() -> bool:
+            nonlocal over_cap
+            # Allow the input streams and their merged copy, but bound unknown lengths.
+            over_cap = _size(workdir / "out") + _size(workdir / "part") > 2 * cap
+            return over_cap
+
+        code = _run(
+            ytdlp_args(url, workdir, port, probe=False, max_bytes=cap),
+            workdir,
+            "download.log",
+            DOWNLOAD_TIMEOUT,
+            workdir / "download.stdout",
+            stop,
+        )
+        size_abort = _last_error(workdir, "download.stdout", _SIZE_ABORT) or _last_error(
+            workdir, "download.log", _SIZE_ABORT
+        )
+        verdict = (
+            ("deferred", "over " + size_cap(MAX_BYTES, limit)[1])
+            if over_cap or size_abort
+            else None
+        )
+
     finally:
         proxy.stop()
     out = workdir / "out"
     files = sorted(p for p in out.iterdir() if p.is_file()) if out.is_dir() else []
-    return Grab(info, None, files, code, _last_error(workdir, "download.log"), proxy.stats)
+    return Grab(info, verdict, files, code, _last_error(workdir, "download.log"), proxy.stats)
 
 
 @dataclass
@@ -239,6 +284,8 @@ def grab_media(
         check_destination(canonical, extra_blocked=extra_blocked)
     except ForbiddenFetch as exc:
         return MediaOutcome("refused", str(exc))
+    except FetchError as exc:
+        return MediaOutcome("failed", str(exc))
     with tempfile.TemporaryDirectory(prefix="dea-media-") as tmp:
         g = grabber(canonical, Path(tmp), limit)
         if g.verdict:
@@ -249,18 +296,39 @@ def grab_media(
         if g.exit_code != 0 or len(media) != 1:
             why = "timed out" if g.exit_code is None else f"exit {g.exit_code}"
             return MediaOutcome("failed", g.error or f"yt-dlp {why}, no file")
-        if media[0].stat().st_size > cap:
-            return MediaOutcome("deferred", f"over {cap_text}", limited=limited)
         files = {f"media{media[0].suffix}": media[0]}
         thumbs = [p for p in g.files if p.stem == "thumbnail"]
         if thumbs:
             files[f"thumbnail{thumbs[0].suffix}"] = thumbs[0]
+        if sum(p.stat().st_size for p in files.values()) > cap:
+            return MediaOutcome("deferred", f"over {cap_text}", limited=limited)
         got = MediaOutcome(
-            "ok", files=files, info={k: g.info[k] for k in INFO_KEEP if k in g.info},
+            "ok", files=files, info=safe_info({k: g.info[k] for k in INFO_KEEP if k in g.info}),
             details={"proxy": g.stats.to_json(), "downloader": _ytdlp_version()},
         )  # fmt: skip
         keep(got)
         return got
+
+
+def safe_metadata_url(value: str) -> str | None:
+    """Drop extractor URLs that have no safe canonical spelling."""
+    try:
+        return canonicalize(value)
+    except ValueError:
+        return None
+
+
+def safe_info(value: Any) -> Any:
+    """Canonicalize URL-valued extractor metadata, including nested fields."""
+    if isinstance(value, dict):
+        return {
+            k: clean for k, v in value.items() if (clean := safe_info(v)) is not None or v is None
+        }
+    if isinstance(value, list):
+        return [clean for v in value if (clean := safe_info(v)) is not None or v is None]
+    if isinstance(value, str) and value.lower().startswith(("https://", "http://")):
+        return safe_metadata_url(value)
+    return value
 
 
 _TYPES = {
@@ -284,12 +352,12 @@ def store_media(
 ) -> None:
     for name, path in got.files.items():
         store.put_file(folder + name, path, _TYPES.get(path.suffix, "application/octet-stream"))
-    put_json(store, folder + "info.json", got.info)
+    put_json(store, folder + "info.json", safe_info(got.info))
     put_json(
         store,
         folder + "capture.json",
         {
-            "canonical": canonical,
+            "canonical": canonicalize(canonical),
             "via": "yt-dlp",
             "title": got.info.get("title"),
             "duration": got.info.get("duration"),

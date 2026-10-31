@@ -246,6 +246,7 @@ spec:
               config:
                 binary: dea-capture
                 prefix_args:
+                  # also reconciles missing capture schedules and raised limits
                   - summary
                   - s3://newsletter-archive
     - summary:

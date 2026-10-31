@@ -135,6 +135,28 @@ def test_forwards_plain_http_in_origin_form(
     assert p.stats.forwarded == 1
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/unsubscribe?token=SECRET",
+        "/do?action=confirm_SECRET_reader%40example.com",
+        "/post?auth_token=SECRET",
+        "/news/reader%40example.com",
+    ],
+)
+def test_plain_http_refuses_subscriber_actions(
+    upstream: _Upstream, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    _allow_loopback(monkeypatch)
+    with GuardProxy(verify=None) as p:
+        p.http_port = upstream.server_address[1]
+        reply = _ask(p.start(), f"GET http://example.org{path} HTTP/1.1\r\n\r\n".encode())
+    assert reply.startswith(b"HTTP/1.1 403")
+    assert b"SECRET" not in reply and b"reader" not in reply
+    assert p.stats.forwarded == 0
+    assert upstream.received == b""
+
+
 def test_tunnels_after_checking_the_certificate(
     upstream: _Upstream, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -170,6 +192,17 @@ def test_no_tunnel_when_the_certificate_check_fails(
     assert reply.startswith(b"HTTP/1.1 502")
     assert p.stats.tunnels == 0
     assert p.stats.failed == 1
+
+
+def test_plain_http_dns_failure_is_a_retryable_502() -> None:
+    def broken(host: str, port: int) -> list[str]:
+        raise socket.gaierror(socket.EAI_AGAIN, "temporary DNS failure")
+
+    with GuardProxy(resolve=broken, verify=None) as p:
+        reply = _ask(p.start(), b"GET http://example.org/article HTTP/1.1\r\n\r\n")
+    assert reply.startswith(b"HTTP/1.1 502")
+    assert p.stats.failed == 1
+    assert not p.stats.refused
 
 
 def test_unreachable_upstream_is_a_502(monkeypatch: pytest.MonkeyPatch) -> None:

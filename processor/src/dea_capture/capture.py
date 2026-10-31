@@ -36,15 +36,16 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from urllib.parse import urlencode, urlsplit
+from uuid import uuid4
 
 from . import __version__
-from .classify import tracking_vendor
+from .classify import canonicalize, tracking_vendor
 from .fetch import FetchError, HostPacer, TooLarge, follow
 from .gallery import store_gallery
 from .guard import ForbiddenFetch, GuardedFetcher
 from .media import MediaOutcome, store_media
 from .page import PageOutcome, store_page
-from .store import Store, ext_for, put_json
+from .store import Store, conditional_write_attempts, ext_for, put_json
 
 Kind = Literal["page", "direct", "media", "gallery"]
 KINDS: tuple[Kind, ...] = ("page", "direct", "media", "gallery")
@@ -74,7 +75,7 @@ LEASE = {
 
 _STAMP = "%Y%m%dT%H%M%SZ"
 _DUE_RE = re.compile(
-    r"^captures/due/(page|direct|media|gallery)/(\d{8}T\d{6}Z)-([0-9a-f]{64})\.json$"
+    r"^captures/due/(page|direct|media|gallery)/(\d{8}T\d{6}Z)-([0-9a-f]{64})(?:-[0-9a-f]{32})?\.json$"
 )
 
 MEDIA_HOSTS = frozenset(
@@ -210,15 +211,35 @@ class CaptureRecord:
         return meta
 
 
-def save(store: Store, rec: CaptureRecord, *, if_absent: bool = False) -> bool:
+def save(
+    store: Store, rec: CaptureRecord, *, if_absent: bool = False, if_match: str | None = None
+) -> bool:
     return put_json(store, index_key(rec.h), asdict(rec), if_absent=if_absent,
-                    metadata=rec.metadata())  # fmt: skip
+                    if_match=if_match, metadata=rec.metadata())  # fmt: skip
 
 
-def _due(store: Store, kind: Kind, when: datetime, h: str) -> str:
-    key = due_key(kind, when, h)
-    put_json(store, key, {"h": h, "kind": kind})
-    return key
+def update(store: Store, h: str, change: Callable[[CaptureRecord], bool]) -> CaptureRecord | None:
+    """Reload and retry a record mutation on conflict. False leaves it untouched."""
+    for _ in conditional_write_attempts(index_key(h)):
+        got = store.get_with_etag(index_key(h))
+        if got is None:
+            return None
+        rec = CaptureRecord.load(got[0])
+        if not change(rec):
+            return None
+        if save(store, rec, if_match=got[1]):
+            return rec
+    return None
+
+
+def fresh_due(kind: Kind, when: datetime, h: str) -> str:
+    # Courier remembers emitted names even after their objects have been deleted.
+    return due_key(kind, when, h).removesuffix(".json") + f"-{uuid4().hex}.json"
+
+
+def publish_due(store: Store, rec: CaptureRecord) -> None:
+    if rec.due:
+        put_json(store, rec.due, {"h": rec.h, "kind": rec.kind})
 
 
 def load_limits(store: Store) -> dict[str, int]:
@@ -274,22 +295,55 @@ def queue(
     rec = CaptureRecord(canonical, h, kind, "queued", when, when, due=due_key(kind, now, h),
                         subs=[subscription] if subscription else None)  # fmt: skip
     if save(store, rec, if_absent=True):
-        _due(store, kind, now, h)
+        publish_due(store, rec)
         return "new"
-    existing = store.get(index_key(h))
-    if existing is None:  # deleted in between; leave it to the next pass
-        return "queued"
-    old = CaptureRecord.load(existing)
-    # a crash between the claim and the due key would strand it
-    if old.status in {"queued", "retrying"} and old.due and not store.exists(old.due):
-        put_json(store, old.due, {"h": h, "kind": old.kind})
-    # not atomic: a capture finishing meanwhile can drop this subscription
-    if _add_sub(old, subscription) and old.status in {"queued", "retrying", "deferred"}:
+
+    def associate(old: CaptureRecord) -> bool:
+        changed = _add_sub(old, subscription)
         if _held_by_limit(old, load_limits(store)):
             old.status, old.updated_at = "queued", when
-            old.due = _due(store, old.kind, now, h)
-        save(store, old)
+            old.due = fresh_due(old.kind, now, h)
+            changed = True
+        return changed
+
+    old = update(store, h, associate)
+    if old is None:
+        data = store.get(index_key(h))
+        old = CaptureRecord.load(data) if data is not None else rec
+    if old.status in {"queued", "retrying"} and old.due and not store.exists(old.due):
+        old = repair_due(store, h, now) or old
     return old.status
+
+
+def repair_due(store: Store, h: str, now: datetime) -> CaptureRecord | None:
+    def repair(rec: CaptureRecord) -> bool:
+        released = _held_by_limit(rec, load_limits(store))
+        if released:
+            rec.status, rec.updated_at = "queued", _iso(now)
+        elif rec.status not in {"queued", "retrying"} or (
+            rec.due is not None and store.exists(rec.due)
+        ):
+            return False
+        when = now
+        if rec.due and not released:
+            _, scheduled, _ = parse_due_key(rec.due)
+            when = max(now, scheduled)
+        rec.due = fresh_due(rec.kind, when, h)
+        return True
+
+    rec = update(store, h, repair)
+    if rec is not None:
+        publish_due(store, rec)
+    return rec
+
+
+def reconcile(store: Store, keys: list[str], now: datetime) -> int:
+    """Repair interrupted schedules and release captures held by older limits."""
+    return sum(
+        repair_due(store, k.removeprefix("captures/index/").removesuffix(".json"), now) is not None
+        for k in keys
+        if k.startswith("captures/index/") and k.endswith(".json")
+    )
 
 
 @dataclass
@@ -326,46 +380,50 @@ def run(
     ``gallery_collector`` (see ``gallery.collect``)."""
     kind, _, h = parse_due_key(key)
     pacer = pacer or HostPacer()
-    data = store.get(index_key(h))
-    if data is None:
-        store.delete(key)
-        return CaptureResult(h, kind, "orphan", "none")
-    rec = CaptureRecord.load(data)
-    if rec.status in FINAL or rec.due != key:
-        # done already, or superseded by a newer due key
-        store.delete(key)
-        return CaptureResult(h, kind, "stale", rec.status, len(rec.attempts))
-    if rec.kind != kind:
-        rec.due = _due(store, rec.kind, now, h)
-        save(store, rec)
-        store.delete(key)
-        return CaptureResult(h, kind, "rerouted", rec.status, len(rec.attempts))
-    if tracking_vendor(rec.canonical):
-        # a click-tracker's URL carries the reader's token: never requested,
-        # here or at the Wayback Machine (older resolves could queue one)
-        rec.attempts.append(Attempt(_iso(now), "refused", error="click-tracker URL"))
-        rec.status, rec.due, rec.updated_at = "refused", None, _iso(now)
-        save(store, rec)
-        store.delete(key)
-        return CaptureResult(h, kind, "refused", rec.status, len(rec.attempts))
-    if (kind == "page" and gallery_post(rec.canonical)
-            and not any(a.rerouted_to == "page" for a in rec.attempts)):  # fmt: skip
-        # queued as a page before there was a gallery stage; one that stage
-        # (or another) handed on to capture-page stays here
-        rec.kind = "gallery"
-        rec.due = _due(store, rec.kind, now, h)
-        save(store, rec)
-        store.delete(key)
-        return CaptureResult(h, kind, "rerouted", rec.status, len(rec.attempts))
-    stages = {"page": page_crawler, "media": media_grabber, "gallery": gallery_collector}
-    if kind in stages and stages[kind] is None:
-        raise NotImplementedError(f"no {kind} capture stage here")
+    disposition = "stale"
+    lease = fresh_due(kind, now + LEASE[kind], h)
 
-    # take a lease: if this process dies, the lease falls due and it runs again
-    lease = _due(store, kind, now + LEASE[kind], h)
-    rec.due = lease
-    save(store, rec)
+    def claim(rec: CaptureRecord) -> bool:
+        nonlocal disposition
+        if rec.status in FINAL or rec.due != key:
+            return False
+        if tracking_vendor(rec.canonical):
+            rec.attempts.append(Attempt(_iso(now), "refused", error="click-tracker URL"))
+            rec.status, rec.due, rec.updated_at = "refused", None, _iso(now)
+            disposition = "refused"
+        elif rec.kind != kind or (
+            kind == "page"
+            and gallery_post(rec.canonical)
+            and not any(a.rerouted_to == "page" for a in rec.attempts)
+        ):
+            if rec.kind == kind:
+                rec.kind = "gallery"
+            rec.due = fresh_due(rec.kind, now, h)
+            disposition = "rerouted"
+        else:
+            stages = {"page": page_crawler, "media": media_grabber, "gallery": gallery_collector}
+            if kind in stages and stages[kind] is None:
+                raise NotImplementedError(f"no {kind} capture stage here")
+            rec.due = lease
+            disposition = "claimed"
+        return True
+
+    rec = update(store, h, claim)
+    if rec is None:
+        data = store.get(index_key(h))
+        old = CaptureRecord.load(data) if data is not None else None
+        store.delete(key)
+        return CaptureResult(
+            h,
+            kind,
+            "stale" if old else "orphan",
+            old.status if old else "none",
+            len(old.attempts) if old else 0,
+        )
+    publish_due(store, rec)
     store.delete(key)
+    if disposition != "claimed":
+        return CaptureResult(h, kind, disposition, rec.status, len(rec.attempts))
 
     limit = size_limit(rec.subs, load_limits(store))
     if kind == "page":
@@ -385,14 +443,14 @@ def run(
         rec.status, rec.capture, rec.due = "ok", attempt.capture, None
     elif attempt.outcome == "rerouted":
         rec.kind = attempt.rerouted_to or "page"
-        rec.due = _due(store, rec.kind, now, h)
+        rec.due = fresh_due(rec.kind, now, h)
     elif attempt.outcome in {"refused", "deferred"}:
         rec.status, rec.due = attempt.outcome, None
     else:
         failures = sum(1 for a in rec.attempts if a.outcome == "failed")
         if failures <= len(RETRY_AFTER):
             rec.status = "retrying"
-            rec.due = _due(store, kind, now + RETRY_AFTER[failures - 1], h)
+            rec.due = fresh_due(kind, now + RETRY_AFTER[failures - 1], h)
         else:
             rec.status, rec.due = "failed", None
         early = kind in WAYBACK_KINDS and (
@@ -403,11 +461,33 @@ def run(
             and rec.wayback is None
             and (early or rec.status == "failed")
         ):
-            rec.wayback = fetch_wayback(store, rec, wayback_fetcher, pacer, now,
-                                        page_crawler if kind == "page" else None)  # fmt: skip
-    save(store, rec)
-    if rec.due != lease:  # a 1 h retry lands on the lease's own key
-        store.delete(lease)
+            rec.wayback = fetch_wayback(
+                store,
+                rec,
+                wayback_fetcher,
+                pacer,
+                now,
+                page_crawler if kind == "page" else None,
+                limit,
+            )
+
+    def finish(latest: CaptureRecord) -> bool:
+        if latest.due != lease:
+            return False
+        latest.attempts = rec.attempts
+        latest.updated_at, latest.status = rec.updated_at, rec.status
+        latest.capture, latest.due, latest.kind = rec.capture, rec.due, rec.kind
+        latest.wayback = rec.wayback
+        return True
+
+    committed = update(store, h, finish)
+    if committed is not None:
+        publish_due(store, committed)
+    store.delete(lease)
+    if committed is None:
+        data = store.get(index_key(h))
+        latest = CaptureRecord.load(data) if data is not None else rec
+        return CaptureResult(h, kind, "stale", latest.status, len(latest.attempts))
     return CaptureResult(h, kind, attempt.outcome, rec.status, len(rec.attempts))
 
 
@@ -427,13 +507,17 @@ def _store_capture(
         store,
         folder + "capture.json",
         {
-            "canonical": rec.canonical,
+            "canonical": canonicalize(rec.canonical),
             "via": via,
             # the canonical URL's own redirects; no subscriber tokens
-            "chain": list(chain),
+            "chain": [canonicalize(url) for url in chain],
             "http_status": status,
             # cookies are the server's for this fetch, not part of what was captured
-            "headers": {k: v for k, v in headers.items() if k.lower() != "set-cookie"},
+            "headers": {
+                k: v
+                for k, v in headers.items()
+                if k.lower() in {"content-type", "content-length", "last-modified"}
+            },
             "file": name,
             "bytes": len(body),
             "sha256": hashlib.sha256(body).hexdigest(),
@@ -551,7 +635,7 @@ def wayback_lookup(
 
 def fetch_wayback(
     store: Store, rec: CaptureRecord, fetcher: GuardedFetcher, pacer: HostPacer, now: datetime,
-    page_crawler: Callable[[str], PageOutcome] | None = None,
+    page_crawler: Callable[[str], PageOutcome] | None = None, limit: int | None = None,
 ) -> dict[str, str] | None:  # fmt: skip
     """Store the Wayback snapshot closest to when the URL was first queued.
     With ``page_crawler``, the replayed snapshot is crawled like any page, into
@@ -568,6 +652,10 @@ def fetch_wayback(
         replay = wayback_url(ts, original, "if_")
         crawled = page_crawler(replay)
         if crawled.outcome == "ok":
+            if _over_limit(
+                _iso(now), sum(map(len, crawled.files.values())), limit, crawled.http_status
+            ):
+                return None
             store_page(store, folder, rec.canonical, crawled, _iso(now), via=f"wayback:{ts}",
                        snapshot=replay)  # fmt: skip
             return {"timestamp": ts, "capture": folder, "via": "crawl"}
@@ -580,5 +668,7 @@ def fetch_wayback(
     if not 200 <= got.response.status < 300:
         return None
     r = got.response
+    if _over_limit(_iso(now), len(r.body), limit, r.status):
+        return None
     _store_capture(store, rec, now, got.chain, r.status, r.headers, r.body, f"wayback:{ts}")
     return {"timestamp": ts, "capture": folder, "via": "raw"}

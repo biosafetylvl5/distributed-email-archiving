@@ -114,6 +114,22 @@ def fake_crawler(tmp_path: Path, **crawl: Any) -> page.Crawler:
     return crawler
 
 
+def test_seed_dns_failure_is_retryable(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(host: str, port: int) -> list[str]:
+        raise OSError("DNS unavailable")
+
+    def check(url: str, **kwargs: Any) -> object:
+        return guard.check_destination(url, broken)
+
+    def never(url: str, path: Path) -> Crawl:
+        pytest.fail("crawler started after failed DNS")
+
+    monkeypatch.setattr(page, "check_destination", check)
+    got = crawl_page("https://example.org/article", never)
+    assert got.outcome == "failed"
+    assert got.error == "cannot resolve example.org"
+
+
 def test_crawl_page_ok(tmp_path: Path) -> None:
     w = make_wacz(tmp_path / "x.wacz", [_page()])
     got = crawl_page(URL, fake_crawler(tmp_path, wacz=w, page=_page(), screenshot=PNG,
@@ -383,3 +399,49 @@ def test_page_keys_need_a_crawler(tmp_path: Path) -> None:
     store, due = _page_store(tmp_path)
     with pytest.raises(NotImplementedError):
         run(store, due, _no_direct(), now=T0 + timedelta(seconds=1))
+
+
+def test_crawler_terminates_group_and_proxy_on_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dea_capture import page
+
+    ended: list[int] = []
+    stopped: list[bool] = []
+
+    class Process:
+        pid = 123
+
+        def wait(self, timeout: float) -> int:
+            raise KeyboardInterrupt
+
+    proxy = GuardProxy(verify=None)
+    stop = proxy.stop
+
+    def stop_proxy() -> None:
+        stopped.append(True)
+        stop()
+
+    monkeypatch.setattr("dea_capture.page.subprocess.Popen", lambda *a, **kw: Process())
+    monkeypatch.setattr(page, "_end_group", ended.append)
+    monkeypatch.setattr(proxy, "stop", stop_proxy)
+    with pytest.raises(KeyboardInterrupt):
+        page.run_crawler("https://example.org/post", tmp_path, proxy)
+    assert ended == [123] and stopped == [True]
+
+
+def test_page_storage_canonicalizes_snapshot_urls(tmp_path: Path) -> None:
+    from dea_capture.page import store_page
+
+    store = LocalStore(tmp_path)
+    got = PageOutcome("ok", 200, files={"page.wacz": b"PK"})
+    store_page(
+        store,
+        "",
+        "https://example.org/post?mc_eid=SECRET",
+        got,
+        "now",
+        snapshot="https://example.org/snapshot?auth_token=SECRET",
+    )
+    meta = store.get("capture.json") or b""
+    assert b"SECRET" not in meta

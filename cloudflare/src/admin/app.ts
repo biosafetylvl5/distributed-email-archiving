@@ -32,7 +32,7 @@ import {
   cleanNote,
   DESCRIPTION_MAX,
   HOSTNAME_RE,
-  isSignupUrl,
+  normalizeSignupUrl,
   NAME_MAX,
   NOTE_MAX,
   TAG_STATUSES,
@@ -568,7 +568,7 @@ ${show !== undefined ? html`<input type="hidden" name="back" value="subscription
 <label>Name <input type="text" name="name" value="${r?.name ?? ""}" placeholder="Ramen Weekly" maxlength="${NAME_MAX}"></label>
 <label>Description <textarea name="description" rows="3" maxlength="${DESCRIPTION_MAX}">${r?.description ?? ""}</textarea></label>
 <label>Sender domain <input type="text" name="sender_domain" value="${r?.sender_domain ?? ""}" placeholder="optional; other senders are quarantined"></label>
-<label>Sign-up link <input type="url" name="signup_url" value="${r?.signup_url ?? ""}" placeholder="https://..."></label>
+<label>Sign-up link <input type="url" name="signup_url" value="${normalizeSignupUrl(r?.signup_url ?? "") ?? ""}" placeholder="https://..."></label>
 <label>Private note <input type="text" name="note" value="${r?.note ?? ""}" maxlength="${NOTE_MAX}"></label>
 <label>Capture size limit (MiB) <input type="number" name="capture_limit_mb" min="1" max="${CAPTURE_LIMIT_MAX_MB}" step="1" value="${r?.capture_limit_mb ?? ""}" placeholder="none"></label>
 </div></details>
@@ -577,11 +577,12 @@ ${show !== undefined ? html`<input type="hidden" name="back" value="subscription
 
 function tagSummary(t: TagEntry): Html {
   const r = t.record;
+  const signupUrl = normalizeSignupUrl(r?.signup_url ?? "");
   return html`${r?.name ? html`<strong>${r.name}</strong><br>` : ""}<code>${t.tag}</code>${
     r?.description ? html`<div class="desc">${r.description}</div>` : ""
   }${
-    r?.signup_url && isSignupUrl(r.signup_url)
-      ? html`<div><a href="${r.signup_url}" rel="noopener noreferrer" target="_blank">sign-up page</a></div>`
+    signupUrl
+      ? html`<div><a href="${signupUrl}" rel="noopener noreferrer" target="_blank">sign-up page</a></div>`
       : ""
   }${r?.note ? html`<div class="muted">Note: ${r.note}</div>` : ""}${
     r?.user_note ? html`<div class="muted">${t.user}'s note: ${r.user_note}</div>` : ""
@@ -702,7 +703,7 @@ async function saveTag(ctx: Ctx, user: string): Promise<Response> {
       ? subscriptionsPath(subscriptionFilter(field(form, "show")))
       : userPath(user);
   const tag = field(form, "tag").toLowerCase();
-  if (!isValidTag(tag)) return redirect(back, { err: `Invalid tag: ${tag}` });
+  if (!isValidTag(tag, user)) return redirect(back, { err: `Invalid tag: ${tag}` });
   const status = field(form, "status");
   if (!(TAG_STATUSES as readonly string[]).includes(status)) {
     return redirect(back, { err: `Invalid status: ${status}` });
@@ -711,9 +712,10 @@ async function saveTag(ctx: Ctx, user: string): Promise<Response> {
   if (senderDomain && !HOSTNAME_RE.test(senderDomain)) {
     return redirect(back, { err: `Invalid sender domain: ${senderDomain}` });
   }
-  const signupUrl = field(form, "signup_url");
-  if (signupUrl && !isSignupUrl(signupUrl)) {
-    return redirect(back, { err: `Invalid sign-up link (must be http or https): ${signupUrl}` });
+  const signupInput = field(form, "signup_url");
+  const signupUrl = normalizeSignupUrl(signupInput);
+  if (signupInput && !signupUrl) {
+    return redirect(back, { err: "Invalid sign-up link (must be http or https)" });
   }
   const limitText = field(form, "capture_limit_mb");
   const limit = limitText ? Number(limitText) : undefined;
@@ -724,7 +726,7 @@ async function saveTag(ctx: Ctx, user: string): Promise<Response> {
     name: cleanName(field(form, "name")),
     description: cleanDescription(field(form, "description")),
     sender_domain: senderDomain,
-    signup_url: signupUrl,
+    signup_url: signupUrl ?? "",
     note: cleanNote(field(form, "note")),
   };
 
@@ -747,7 +749,7 @@ async function saveTag(ctx: Ctx, user: string): Promise<Response> {
   }
   next.updated_at = new Date().toISOString();
   await putTag(ctx.env, user, tag, next);
-  if (next.capture_limit_mb !== current.capture_limit_mb) await syncCaptureLimits(ctx.env);
+  await syncCaptureLimits(ctx.env);
   return redirect(back, { msg: `Saved ${user}/${tag} (${status})` });
 }
 
@@ -844,7 +846,9 @@ ${SETTING_KEYS.map(
 ${editable ? html`<button>Save overrides</button>` : ""}</form>
 <p class="muted"><strong>strict</strong> rejects mail to unknown tags; <strong>quarantine</strong> stores it in
 <code>incoming/quarantine/</code>. Leave a field blank to fall back to wrangler.toml, then the default.
-Changes reach the mail Worker within about a minute.</p>`,
+Changes reach the mail Worker within about a minute.</p>
+<form method="post" action="/settings/capture-limits/sync"><button>Re-sync capture limits</button></form>
+<p class="muted">Rebuild the processor's limits mirror after subscription changes made outside the dashboard.</p>`,
   );
 }
 
@@ -880,7 +884,6 @@ const MESSAGE_PAGE_CSP =
 const HEADER_LABELS = [
   ["subject", "Subject"],
   ["from", "From"],
-  ["to", "To"],
   ["date", "Date"],
   ["list-id", "List-Id"],
 ] as const;
@@ -907,6 +910,7 @@ async function messagePage(ctx: Ctx, sha: string): Promise<Response> {
   const eml = key ? await env.ARCHIVE.head(key) : null;
   if (!eml && !meta) return text(404, "not found");
   const m = key ? /^incoming\/archive\/(\d{4}-\d{2}-\d{2})\//.exec(key) : null;
+  const dayQuery = m ? `?day=${m[1]}` : "";
   const user = eml?.customMetadata?.user ?? "";
   const tag = eml?.customMetadata?.tag ?? "";
   const emlBytes = eml?.size ?? meta?.sizes.eml ?? 0;
@@ -914,7 +918,7 @@ async function messagePage(ctx: Ctx, sha: string): Promise<Response> {
   const subject = meta?.headers.subject || "(no subject)";
   const body = html`<p>${m ? html`Received ${m[1]}` : ""}${user ? html` for <a href="${userPath(user)}">${user}</a> <code>${tag || "(bare)"}</code>` : ""}
 · <code title="${sha}">${sha.slice(0, 12)}</code>
-${key ? html` · <a href="/messages/${sha}/source">view source</a> · <a href="/messages/${sha}/raw">download .eml</a>` : ""}
+${key ? html` · <a href="/messages/${sha}/source${dayQuery}">view source</a> · <a href="/messages/${sha}/raw${dayQuery}">download .eml</a>` : ""}
 · <a href="/captures">all messages</a></p>
 ${
   meta
@@ -1058,6 +1062,10 @@ async function route(ctx: Ctx): Promise<Response> {
     if (!sameOrigin(request, url)) return text(403, "cross-origin request refused");
     if (path === "/users") return addUser(ctx);
     if (path === "/settings") return saveSettings(ctx);
+    if (path === "/settings/capture-limits/sync") {
+      await syncCaptureLimits(ctx.env);
+      return redirect("/settings", { msg: "Capture limits re-synced" });
+    }
     if (path === "/quarantine/promote") return promoteMessage(ctx);
     if (path === "/captures/retry") return retryCaptures(ctx);
     if (userMatch && userMatch[2]) {

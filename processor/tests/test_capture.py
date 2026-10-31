@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 import pytest
@@ -81,6 +82,27 @@ def _record(store: LocalStore, canonical: str) -> CaptureRecord:
 def _due_keys(root: Path) -> list[str]:
     due = root / "captures" / "due"
     return sorted(str(p.relative_to(root)) for p in due.rglob("*.json")) if due.exists() else []
+
+
+class HookStore(LocalStore):
+    before_put: Callable[[str, bytes], None] | None = None
+
+    def put(
+        self,
+        key: str,
+        data: bytes,
+        content_type: str,
+        *,
+        if_absent: bool = False,
+        if_match: str | None = None,
+        metadata: Mapping[str, str] | None = None,
+    ) -> bool:
+        if self.before_put and not if_absent:
+            self.before_put(key, data)
+        options: dict[str, Any] = {"if_absent": if_absent, "metadata": metadata}
+        if if_match is not None:
+            options["if_match"] = if_match
+        return super().put(key, data, content_type, **options)
 
 
 # ── resolve ──────────────────────────────────────────────────────────────────
@@ -213,7 +235,10 @@ def test_a_lost_due_key_is_put_back(tmp_path: Path) -> None:
     queue(store, PDF, "direct", T0)
     store.delete(due_key("direct", T0, url_hash(PDF)))
     queue(store, PDF, "direct", T0)
-    assert _due_keys(tmp_path) == [due_key("direct", T0, url_hash(PDF))]
+    rec = _record(store, PDF)
+    assert rec.due is not None and rec.due != due_key("direct", T0, rec.h)
+    assert parse_due_key(rec.due) == ("direct", T0, rec.h)
+    assert _due_keys(tmp_path) == [rec.due]
 
 
 # ── capture-direct ───────────────────────────────────────────────────────────
@@ -337,7 +362,8 @@ def test_html_is_handed_to_the_page_stage(tmp_path: Path) -> None:
     assert result.outcome == "rerouted"
     rec = _record(store, "https://www.example.org/file.pdf")
     assert (rec.kind, rec.status) == ("page", "queued")
-    assert _due_keys(tmp_path) == [due_key("page", T0, rec.h)]
+    assert rec.due is not None and _due_keys(tmp_path) == [rec.due]
+    assert parse_due_key(rec.due) == ("page", T0, rec.h)
 
 
 def test_a_link_that_lands_on_a_video_page_goes_to_the_media_stage(tmp_path: Path) -> None:
@@ -348,7 +374,8 @@ def test_a_link_that_lands_on_a_video_page_goes_to_the_media_stage(tmp_path: Pat
     assert result.outcome == "rerouted"
     rec = _record(store, link)
     assert (rec.kind, rec.status, rec.capture) == ("media", "queued", None)
-    assert _due_keys(tmp_path) == [due_key("media", T0, rec.h)]
+    assert rec.due is not None and _due_keys(tmp_path) == [rec.due]
+    assert parse_due_key(rec.due) == ("media", T0, rec.h)
 
 
 def test_stored_headers_leave_out_cookies(tmp_path: Path) -> None:
@@ -462,15 +489,38 @@ def test_done_issues_get_their_links_resolved_once(tmp_path: Path) -> None:
 # ── the due poller ───────────────────────────────────────────────────────────
 
 
-def test_due_poller_waits_for_the_time_in_the_key() -> None:
+def test_due_poller_waits_for_the_time_in_the_key(monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("courier")
+    from types import SimpleNamespace
+
+    from courier.config import ServiceConfig
+
+    import dea_capture.courier_plugin as plugin
     from dea_capture.courier_plugin import S3DuePoller, is_due
 
     h = url_hash(PDF)
-    assert is_due(due_key("direct", T0, h), now=T0)
-    assert not is_due(due_key("direct", T0 + timedelta(seconds=1), h), now=T0)
-    assert not is_due("captures/due/direct/junk.json", now=T0)
-    assert S3DuePoller.name == "s3_due_poller"
+    current = T0
+    future = due_key("direct", T0 + timedelta(seconds=1), h)
+    now_key = due_key("direct", T0, h)
+    service: Any = SimpleNamespace(config=ServiceConfig())
+    poller = S3DuePoller(service, {"bucket": "example", "suffix_filter": [".json"]})
+    real_is_due = is_due
+    monkeypatch.setattr(plugin, "is_due", lambda key: real_is_due(key, current))
+    assert poller._matches_suffix(now_key)
+    assert not poller._matches_suffix(future)
+    assert not poller._matches_suffix("captures/due/direct/junk.json")
+    assert not poller._matches_suffix(future.removesuffix(".json") + ".txt")
+
+    client = SimpleNamespace(
+        get_paginator=lambda _: SimpleNamespace(
+            paginate=lambda **_: [{"Contents": [{"Key": future}]}]
+        )
+    )
+    assert list(poller._scan_bucket(client)) == []
+    current += timedelta(seconds=1)
+    emitted = list(poller._scan_bucket(client))
+    assert [str(d.file) for d in emitted] == [f"s3://example/{future}"]
+    assert list(poller._scan_bucket(client)) == []
 
 
 def test_resolve_never_requests_a_hop_with_the_readers_address() -> None:
@@ -481,3 +531,198 @@ def test_resolve_never_requests_a_hop_with_the_readers_address() -> None:
     assert web.requested == [a]
     assert r.stopped_at_auth
     assert r.canonical == "https://substack.com/signup"
+
+
+def test_queue_associations_retry_conflicts_without_resurrecting_state(tmp_path: Path) -> None:
+    store = HookStore(tmp_path)
+    queue(store, PDF, "direct", T0, "example/first")
+    key = _record(store, PDF).due or ""
+
+    def concurrent(key_written: str, data: bytes) -> None:
+        if key_written == index_key(url_hash(PDF)) and "example/second" in data.decode():
+            store.before_put = None
+            queue(store, PDF, "direct", T0, "example/third")
+            result = run(
+                store,
+                key,
+                _guarded(Web(bodies={PDF: ("application/pdf", b"pdf")})),
+                now=T0,
+                pacer=HostPacer(0),
+            )
+            assert result.status == "ok"
+
+    store.before_put = concurrent
+    assert queue(store, PDF, "direct", T0, "example/second") == "ok"
+    rec = _record(store, PDF)
+    assert rec.status == "ok" and rec.due is None and rec.capture
+    assert set(rec.subs or []) == {"example/first", "example/second", "example/third"}
+    assert not _due_keys(tmp_path)
+
+
+def test_completion_reloads_concurrent_associations(tmp_path: Path) -> None:
+    store = HookStore(tmp_path)
+    queue(store, PDF, "direct", T0, "example/first")
+
+    def concurrent(key: str, data: bytes) -> None:
+        if key == index_key(url_hash(PDF)) and json.loads(data)["status"] == "ok":
+            store.before_put = None
+            queue(store, PDF, "direct", T0, "example/second")
+
+    store.before_put = concurrent
+    run(
+        store,
+        _record(store, PDF).due or "",
+        _guarded(Web(bodies={PDF: ("application/pdf", b"x")})),
+        now=T0,
+        pacer=HostPacer(0),
+    )
+    rec = _record(store, PDF)
+    assert rec.status == "ok" and rec.subs == ["example/first", "example/second"]
+
+
+def test_duplicate_delivery_cannot_claim_an_existing_lease(tmp_path: Path) -> None:
+    store = HookStore(tmp_path)
+    queue(store, PDF, "direct", T0)
+    key = _record(store, PDF).due or ""
+    web = Web(bodies={PDF: ("application/pdf", b"x")})
+
+    def concurrent(key_written: str, data: bytes) -> None:
+        if key_written == index_key(url_hash(PDF)):
+            store.before_put = None
+            assert run(store, key, _guarded(web), now=T0, pacer=HostPacer(0)).status == "ok"
+
+    store.before_put = concurrent
+    result = run(store, key, _guarded(web), now=T0, pacer=HostPacer(0))
+    assert result.outcome == "stale" and web.requested == [PDF]
+    assert len(_record(store, PDF).attempts) == 1
+
+
+@pytest.mark.parametrize("boundary", ["initial", "lease", "reroute", "retry"])
+def test_reconcile_repairs_interrupted_due_publication(tmp_path: Path, boundary: str) -> None:
+    from dea_capture.capture import reconcile
+
+    store = HookStore(tmp_path)
+    if boundary != "initial":
+        queue(store, PDF, "direct", T0)
+    old = _record(store, PDF).due if boundary != "initial" else None
+
+    def interrupt(key: str, data: bytes) -> None:
+        if not key.startswith("captures/due/"):
+            return
+        rec = _record(store, PDF)
+        # Every published due must already be authorized by the index.
+        assert rec.due == key
+        is_lease = parse_due_key(key)[1] == T0 + timedelta(hours=1)
+        if (
+            boundary == "lease"
+            or (boundary == "initial")
+            or (boundary == "reroute" and rec.kind == "page")
+            or (boundary == "retry" and rec.status == "retrying")
+        ):
+            store.before_put = None
+            raise OSError("interrupted publication")
+        assert is_lease
+
+    store.before_put = interrupt
+    with pytest.raises(OSError, match="interrupted publication"):
+        if boundary == "initial":
+            queue(store, PDF, "direct", T0)
+        else:
+            web = Web(status={PDF: 500}) if boundary == "retry" else Web()
+            run(store, old or "", _guarded(web), now=T0, pacer=HostPacer(0))
+    stranded = _record(store, PDF)
+    assert stranded.due is not None and not store.exists(stranded.due)
+    keys = [index_key(stranded.h)]
+    assert reconcile(store, keys, T0) == 1
+    rec = _record(store, PDF)
+    assert rec.due is not None and rec.due != stranded.due and store.exists(rec.due)
+    assert parse_due_key(rec.due) == parse_due_key(stranded.due)
+    assert reconcile(store, keys, T0) == 0
+
+
+def test_direct_capture_metadata_canonicalizes_redirects_and_omits_headers(tmp_path: Path) -> None:
+    target = "https://example.org/final.pdf?mc_eid=SECRET"
+    store, key = _queued(tmp_path, PDF)
+
+    class RedirectWeb(Web):
+        def get(self, url: str, *, addresses: Sequence[IPAddress]) -> Response:
+            if url == PDF:
+                return Response(url, 302, {"location": target}, b"")
+            return Response(
+                url,
+                200,
+                {
+                    "content-type": "application/pdf",
+                    "link": "https://example.org/?auth_token=SECRET",
+                },
+                b"x",
+            )
+
+    run(store, key, _guarded(RedirectWeb()), now=T0, pacer=HostPacer(0))
+    rec = _record(store, PDF)
+    meta = store.get((rec.capture or "") + "capture.json") or b""
+    assert b"SECRET" not in meta and b"mc_eid" not in meta and b'"link"' not in meta
+    assert json.loads(meta)["chain"] == [PDF, "https://example.org/final.pdf"]
+
+
+def test_completion_cannot_overwrite_a_superseding_lease(tmp_path: Path) -> None:
+    store = LocalStore(tmp_path)
+    queue(store, PDF, "direct", T0)
+    second = Web(bodies={PDF: ("application/pdf", b"new")})
+    later = T0 + timedelta(hours=1)
+
+    class SlowWeb(Web):
+        def get(self, url: str, *, addresses: Sequence[IPAddress]) -> Response:
+            lease = _record(store, PDF).due or ""
+            assert run(store, lease, _guarded(second), now=later, pacer=HostPacer(0)).status == "ok"
+            return Response(url, 200, {"content-type": "application/pdf"}, b"old")
+
+    result = run(
+        store, _record(store, PDF).due or "", _guarded(SlowWeb()), now=T0, pacer=HostPacer(0)
+    )
+    rec = _record(store, PDF)
+    assert result.outcome == "stale"
+    assert rec.status == "ok" and len(rec.attempts) == 1
+    assert store.get((rec.capture or "") + "original.pdf") == b"new"
+
+
+def test_interrupted_completion_is_recovered_by_the_lease(tmp_path: Path) -> None:
+    store = HookStore(tmp_path)
+    queue(store, PDF, "direct", T0)
+
+    def interrupt(key: str, data: bytes) -> None:
+        if key == index_key(url_hash(PDF)) and json.loads(data)["status"] == "ok":
+            store.before_put = None
+            raise OSError("interrupted completion")
+
+    web = Web(bodies={PDF: ("application/pdf", b"pdf")})
+    store.before_put = interrupt
+    with pytest.raises(OSError, match="interrupted completion"):
+        run(store, _record(store, PDF).due or "", _guarded(web), now=T0, pacer=HostPacer(0))
+    rec = _record(store, PDF)
+    assert rec.status == "queued" and not rec.attempts
+    assert rec.due is not None and store.exists(rec.due)
+    result = run(store, rec.due, _guarded(web), now=T0 + timedelta(hours=1), pacer=HostPacer(0))
+    assert result.status == "ok" and len(_record(store, PDF).attempts) == 1
+
+
+@pytest.mark.parametrize("command", ["reconcile", "summary"])
+def test_reconciler_cli_and_summary_ticker_repair_missing_schedules(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    from dea_capture import cli
+
+    store = LocalStore(tmp_path)
+    queue(store, PDF, "direct", T0)
+    old = _record(store, PDF).due or ""
+    store.delete(old)
+    monkeypatch.setattr(cli, "S3Store", lambda bucket: store)
+    monkeypatch.setattr("dea_capture.cli.summary.build", lambda store: {})
+    args = [command, "s3://example"] + (["--no-retries"] if command == "summary" else [])
+    assert cli.main(args) == 0
+    rec = _record(store, PDF)
+    assert rec.due is not None and rec.due != old and store.exists(rec.due)
+    assert "RECONCILE repaired=1" in capsys.readouterr().out

@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol
 from urllib.parse import urlsplit
 
-from .classify import NEVER_FETCH, classify, has_auth_param
+from .classify import NEVER_FETCH, Decision, classify, has_auth_param, normalized_host
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
@@ -46,6 +46,10 @@ ALWAYS_BLOCKED: tuple[IPNetwork, ...] = tuple(
         "64:ff9b::/96", "2002::/16",
     )
 )  # fmt: skip
+
+
+class FetchError(Exception):
+    """A request that failed in a way worth retrying later."""
 
 
 class ForbiddenFetch(Exception):
@@ -98,7 +102,7 @@ def check_destination(
         raise ForbiddenFetch(f"scheme '{parts.scheme}' is not http or https")
     if parts.username is not None or parts.password is not None:
         raise ForbiddenFetch("credentials in URL")
-    host = parts.hostname
+    host = normalized_host(url)
     if not host:
         raise ForbiddenFetch("no host")
     try:
@@ -111,10 +115,12 @@ def check_destination(
     except ValueError:
         try:
             raw = [ipaddress.ip_address(a.split("%")[0]) for a in resolve(host, port)]
-        except (OSError, UnicodeError) as exc:
-            raise ForbiddenFetch(f"cannot resolve {host}: {exc}") from exc
+        except UnicodeError as exc:
+            raise ForbiddenFetch("invalid host") from exc
+        except OSError as exc:
+            raise FetchError(f"cannot resolve {host}") from exc
     if not raw:
-        raise ForbiddenFetch(f"{host} has no addresses")
+        raise FetchError(f"{host} has no addresses")
     # one private address is enough to refuse: the connection could pick it
     for addr in raw:
         if not is_public(addr, blocked):
@@ -125,7 +131,7 @@ def check_destination(
 def check_link(url: str, unsubscribe_urls: Iterable[str] = ()) -> None:
     """ForbiddenFetch unless ``url`` is safe to request as a link or hop."""
     c = classify(url, "", unsubscribe_urls)
-    if c.link_class in NEVER_FETCH:
+    if c.link_class in NEVER_FETCH or c.decision == Decision.SKIP:
         raise ForbiddenFetch(f"{c.link_class}: {c.reason}")
     if has_auth_param(url):
         raise ForbiddenFetch("auth parameter present; request the canonical URL instead")

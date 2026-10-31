@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { isValidTag, isValidUser } from "../src/policy";
 import {
   DEFAULTS,
@@ -76,6 +76,21 @@ describe("sanitizeOverrides / loadOverrides", () => {
 
   it("returns no overrides without a SETTINGS binding", async () => {
     expect(await loadOverrides(undefined)).toEqual({});
+  });
+
+  it("ignores malformed JSON and falls through to config and defaults", async () => {
+    const kv = new FakeKV({ settings: "{" });
+    const overrides = await loadOverrides(kv as unknown as KVNamespace);
+    expect(overrides).toEqual({});
+    const { settings } = resolveSettings({ TAG_DAILY_CAP: "7" }, overrides);
+    expect(settings.tag_daily_cap).toBe(7);
+    expect(settings.policy_mode).toBe(DEFAULTS.policy_mode);
+  });
+
+  it("propagates KV read failures instead of treating them as invalid settings", async () => {
+    const kv = new FakeKV();
+    vi.spyOn(kv, "get").mockRejectedValue(new Error("KV unavailable"));
+    await expect(loadOverrides(kv as unknown as KVNamespace)).rejects.toThrow("KV unavailable");
   });
 
   it("reads the settings key from KV", async () => {
