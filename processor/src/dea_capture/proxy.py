@@ -14,7 +14,10 @@ Two kinds of request are served:
   certificates through it (browsertrix starts it with
   ``--ignore-certificate-errors`` whenever a proxy is set), so the proxy does:
   before opening a tunnel it completes its own verified TLS handshake with the
-  same address, once per host and address.
+  same address, once per host and address. A server that leaves its
+  intermediate certificate out gets it fetched from the address its own
+  certificate gives (``caIssuers``), as browsers do; the chain must still end
+  at a trusted root.
 - Plain ``http://host/...`` requests on port 80, forwarded with
   ``Connection: close``.
 
@@ -34,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import NoReturn
 from urllib.parse import urlsplit
 
+from .fetch import FetchError, HttpFetcher, TooLarge
 from .guard import (
     ForbiddenFetch,
     IPAddress,
@@ -45,6 +49,8 @@ from .guard import (
 
 # checks that the server at an address holds a valid certificate for a host
 Verifier = Callable[[str, IPAddress], Awaitable[None]]
+# a CA certificate's URL -> the certificate (DER), or None
+IssuerFetcher = Callable[[str], bytes | None]
 
 MAX_HEAD = 64 * 1024
 _HOP_HEADERS = frozenset(
@@ -67,14 +73,133 @@ class ProxyStats:
         }  # fmt: skip
 
 
-async def verify_tls(host: str, addr: IPAddress, timeout: float = 10.0) -> None:
-    ctx = ssl.create_default_context()
+# X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY: the chain is missing a link
+_MISSING_ISSUER = 20
+# id-ad-caIssuers (1.3.6.1.5.5.7.48.2), which a URI ([6]) follows
+_CA_ISSUERS = bytes.fromhex("06082b06010505073002")
+ISSUER_MAX_BYTES = 64 * 1024
+
+
+def ca_issuers(der: bytes) -> list[str]:
+    """The http(s) URLs a certificate gives for its issuer's certificate."""
+    urls: list[str] = []
+    i = 0
+    while (i := der.find(_CA_ISSUERS, i)) >= 0:
+        i += len(_CA_ISSUERS)
+        if i + 2 > len(der) or der[i] != 0x86 or der[i + 1] & 0x80:
+            continue
+        url = der[i + 2 : i + 2 + der[i + 1]].decode("ascii", "replace")
+        if url.startswith(("http://", "https://")):
+            urls.append(url)
+    return urls
+
+
+def _tlv(der: bytes, i: int) -> tuple[int, int, int]:
+    """The DER element at ``i``: (tag, start of its contents, its end)."""
+    tag, n, j = der[i], der[i + 1], i + 2
+    if n & 0x80:
+        k = n & 0x7F
+        n, j = int.from_bytes(der[j : j + k]), j + k
+    if j + n > len(der):
+        raise ValueError("truncated")
+    return tag, j, j + n
+
+
+def self_issued(der: bytes) -> bool:
+    """Whether a certificate names itself as its issuer (a root, which must
+    never be taken from a server); unreadable ones count as self-issued."""
+    try:
+        _, i, _ = _tlv(der, 0)  # Certificate
+        _, i, _ = _tlv(der, i)  # tbsCertificate
+        tag, _, end = _tlv(der, i)
+        i = end if tag == 0xA0 else i  # version
+        i = _tlv(der, i)[2]  # serialNumber
+        i = _tlv(der, i)[2]  # signature
+        issuer_end = _tlv(der, i)[2]
+        issuer = der[i:issuer_end]
+        i = _tlv(der, issuer_end)[2]  # validity
+        subject = der[i : _tlv(der, i)[2]]
+    except (IndexError, ValueError):
+        return True
+    return issuer == subject
+
+
+class GuardedIssuers:
+    """Fetches CA certificates through the guard, remembering each URL's."""
+
+    def __init__(self, resolve: Resolver, extra_blocked: Sequence[IPNetwork]) -> None:
+        self.resolve, self.extra_blocked = resolve, extra_blocked
+        self.http = HttpFetcher(connect_timeout=5, total_timeout=10, max_bytes=ISSUER_MAX_BYTES)
+        self.seen: dict[str, bytes | None] = {}
+
+    def __call__(self, url: str) -> bytes | None:
+        if url not in self.seen:
+            self.seen[url] = self._fetch(url)
+        return self.seen[url]
+
+    def _fetch(self, url: str) -> bytes | None:
+        try:
+            addresses = check_destination(url, self.resolve, self.extra_blocked)
+            resp = self.http.get(url, addresses=addresses)
+        except (ForbiddenFetch, FetchError, TooLarge, OSError, ValueError):
+            return None
+        body = resp.body
+        if resp.status != 200 or not body:
+            return None
+        if body.startswith(b"-----BEGIN CERTIFICATE-----"):
+            try:
+                return ssl.PEM_cert_to_DER_cert(body.decode("ascii"))
+            except ValueError:
+                return None
+        return body if body[0] == 0x30 else None
+
+
+async def _handshake(
+    host: str, addr: IPAddress, port: int, ctx: ssl.SSLContext, timeout: float
+) -> bytes | None:
+    """A TLS handshake; returns the server's certificate (DER)."""
     _, writer = await asyncio.wait_for(
-        asyncio.open_connection(str(addr), 443, ssl=ctx, server_hostname=host), timeout
+        asyncio.open_connection(str(addr), port, ssl=ctx, server_hostname=host), timeout
     )
+    tls = writer.get_extra_info("ssl_object")
+    der: bytes | None = tls.getpeercert(binary_form=True) if tls else None
     writer.close()
     with contextlib.suppress(OSError, ssl.SSLError):
         await writer.wait_closed()
+    return der
+
+
+async def verify_tls(
+    host: str, addr: IPAddress, timeout: float = 10.0, *, port: int = 443,
+    issuers: IssuerFetcher | None = None,
+    context: Callable[[], ssl.SSLContext] = ssl.create_default_context,
+) -> None:  # fmt: skip
+    """Raises unless the server at ``addr`` has a valid certificate for
+    ``host``. With ``issuers``, a missing intermediate certificate is fetched
+    from where the server's certificate says (never a root: the chain must
+    still end at one ``context`` trusts)."""
+    try:
+        await _handshake(host, addr, port, context(), timeout)
+        return
+    except ssl.SSLCertVerificationError as exc:
+        if issuers is None or exc.verify_code != _MISSING_ISSUER:
+            raise
+        error = exc
+    unchecked = context()
+    unchecked.check_hostname, unchecked.verify_mode = False, ssl.CERT_NONE
+    leaf = await _handshake(host, addr, port, unchecked, timeout)
+    loop = asyncio.get_running_loop()
+    for url in ca_issuers(leaf or b"")[:2]:
+        der = await loop.run_in_executor(None, issuers, url)
+        if not der or self_issued(der):
+            continue
+        ctx = context()
+        # the fetched certificate may only link the chain, never end it
+        ctx.verify_flags &= ~ssl.VERIFY_X509_PARTIAL_CHAIN
+        ctx.load_verify_locations(cadata=der)
+        await _handshake(host, addr, port, ctx, timeout)
+        return
+    raise error
 
 
 class _Refused(Exception):
@@ -94,6 +219,13 @@ class GuardProxy:
     ) -> None:
         self.resolve = resolve
         self.extra_blocked = tuple(extra_blocked)
+        if verify is verify_tls:
+            issuers = GuardedIssuers(resolve, self.extra_blocked)
+
+            async def verify_with_issuers(host: str, addr: IPAddress) -> None:
+                await verify_tls(host, addr, issuers=issuers)
+
+            verify = verify_with_issuers
         self.verify = verify
         self.connect_timeout = connect_timeout
         self.idle_timeout = idle_timeout

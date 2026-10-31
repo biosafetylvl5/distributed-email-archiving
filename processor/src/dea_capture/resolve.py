@@ -14,6 +14,14 @@ A chain that ends on a tracker (one that answered 429, 403 or an
 interstitial page instead of redirecting) has failed: the tracker's URL
 carries the reader's token, and is never a canonical URL.
 
+A chain that has left the trackers, but whose destination doesn't answer
+plain HTTP (it times out, as sites behind bot protection do with anything
+that isn't a browser; its TLS fails; or it loops through a cookie check),
+is handed to the browser: the outcome is ok, ``browser`` is set, and the
+canonical URL is the destination as far as it's known. capture-page loads it
+in a real browser, which follows the rest of the way, and falls back to the
+Wayback Machine if the site turns the browser away too.
+
 The chain holds the original, tokenized hrefs, so a ``Resolution`` belongs in
 the issue's private files only.
 """
@@ -46,6 +54,16 @@ class Resolution:
     # the chain stopped before an auth-parameter hop instead of requesting it
     stopped_at_auth: bool = False
     error: str | None = None
+    # the destination didn't answer plain HTTP; left to the browser (`error` says why)
+    browser: bool = False
+
+
+def _to_browser(chain: list[str], at: str, error: str) -> Resolution | None:
+    """Hand ``at``, a destination past the trackers, to the browser; None if
+    the chain hasn't left the trackers (or ``at`` would log the reader in)."""
+    if at == chain[0] or tracking_vendor(at) or has_auth_param(at):
+        return None
+    return Resolution("ok", chain, at, canonicalize(at), error=error, browser=True)
 
 
 def resolve(
@@ -64,7 +82,7 @@ def resolve(
         except ForbiddenFetch as exc:
             return Resolution("refused", chain, error=str(exc))
         except FetchError as exc:
-            return Resolution("failed", chain, error=str(exc))
+            return _to_browser(chain, url, str(exc)) or Resolution("failed", chain, error=str(exc))
         location = resp.headers.get("location")
         if (resp.status not in REDIRECTS or not location) and tracking_vendor(url):
             return Resolution(
@@ -78,6 +96,10 @@ def resolve(
             )  # fmt: skip
         nxt = urljoin(url, location.strip())
         if nxt in chain:
-            return Resolution("failed", chain, error="redirect loop")
+            # the page as the tracker sent the reader there, before the loop
+            landing = next((u for u in chain[1:] if not tracking_vendor(u)), url)
+            return _to_browser(chain, landing, "redirect loop") or Resolution(
+                "failed", chain, error="redirect loop"
+            )
         chain.append(nxt)
     return Resolution("failed", chain, error=f"more than {max_hops} redirects")

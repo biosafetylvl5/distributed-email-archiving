@@ -22,12 +22,12 @@ from dea_capture.capture import (
     url_hash,
     wayback_url,
 )
-from dea_capture.classify import tracking_vendor
-from dea_capture.fetch import HostPacer, TooLarge
+from dea_capture.classify import classify, tracking_vendor
+from dea_capture.fetch import FetchError, HostPacer, TooLarge
 from dea_capture.guard import GuardedFetcher, IPAddress, Response
 from dea_capture.inventory import Inventory
 from dea_capture.issue import process_issue, status_key
-from dea_capture.links import captures_key
+from dea_capture.links import _link_record, captures_key
 from dea_capture.page import PageOutcome
 from dea_capture.resolve import resolve
 from dea_capture.store import LocalStore
@@ -49,12 +49,16 @@ class Web:
     requested: list[str] = field(default_factory=list)
     # trackers not in ``redirects`` send the click to a landing page of their own
     trackers_land: bool = False
+    # URLs that never answer plain HTTP, and the error they give
+    down: dict[str, str] = field(default_factory=dict)
 
     def get(self, url: str, *, addresses: Sequence[IPAddress]) -> Response:
         assert not any(m in url for m in FORBIDDEN_MARKERS), url
         self.requested.append(url)
         if url in self.huge:
             raise TooLarge(10)
+        if url in self.down:
+            raise FetchError(self.down[url])
         if url in self.redirects:
             return Response(url, 302, {"location": self.redirects[url]}, b"")
         if self.trackers_land and tracking_vendor(url):
@@ -123,11 +127,53 @@ def test_a_tracker_that_does_not_redirect_is_never_the_canonical(status: int) ->
 
 
 def test_resolve_reports_loops_and_long_chains() -> None:
-    a, b = "https://x.example.com/a", "https://x.example.com/b"
+    a, b = "https://click.example.com/r/a", "https://click.example.com/r/b"
     assert resolve(a, _guarded(Web(redirects={a: b, b: a})), HostPacer(0)).outcome == "failed"
     chain = {f"https://x.example.com/{i}": f"https://x.example.com/{i + 1}" for i in range(20)}
     r = resolve("https://x.example.com/0", _guarded(Web(redirects=chain)), HostPacer(0), max_hops=3)
     assert r.outcome == "failed" and "redirects" in (r.error or "")
+
+
+TRACKER = "https://substack.com/redirect/3f2a-uuid?j=eyJ1IjoxfQ.sig"
+
+
+def test_a_destination_that_wont_answer_plain_http_is_left_to_the_browser() -> None:
+    b = "https://www.example.org/news/story/?utm_source=x"
+    web = Web(redirects={TRACKER: b}, down={b: "203.0.113.5: ReadTimeoutError"})
+    r = resolve(TRACKER, _guarded(web), HostPacer(0))
+    assert (r.outcome, r.browser, r.final) == ("ok", True, b)
+    assert r.canonical == "https://www.example.org/news/story/"
+    assert r.error == "203.0.113.5: ReadTimeoutError"
+    assert r.http_status is None
+
+
+def test_a_cookie_check_loop_leaves_the_landing_page_to_the_browser() -> None:
+    b = "https://www.example.org/post?utm_medium=email"
+    check, again = "https://www.example.org/check", "https://www.example.org/check?x=1"
+    web = Web(redirects={TRACKER: b, b: check, check: again, again: check})
+    r = resolve(TRACKER, _guarded(web), HostPacer(0))
+    assert (r.outcome, r.browser, r.error) == ("ok", True, "redirect loop")
+    assert r.canonical == "https://www.example.org/post"
+
+
+def test_a_tracker_that_wont_answer_is_never_left_to_the_browser() -> None:
+    web = Web(down={TRACKER: "timeout"})
+    r = resolve(TRACKER, _guarded(web), HostPacer(0))
+    assert (r.outcome, r.browser, r.canonical) == ("failed", False, None)
+    # nor one further down the chain
+    b = "https://click.example.com/r/9"
+    web = Web(redirects={TRACKER: b}, down={b: "timeout"})
+    r = resolve(TRACKER, _guarded(web), HostPacer(0))
+    assert (r.outcome, r.browser, r.canonical) == ("failed", False, None)
+
+
+def test_a_file_left_to_the_browser_is_queued_as_a_page(tmp_path: Path) -> None:
+    store = LocalStore(tmp_path)
+    pdf = "https://www.example.org/bill.pdf"
+    web = Web(redirects={TRACKER: pdf}, down={pdf: "SSLError"})
+    rec = _link_record(classify(TRACKER), store, _guarded(web), HostPacer(0), T0, {})
+    assert (rec.outcome, rec.browser, rec.kind, rec.queued) == ("ok", True, "page", "new")
+    assert _record(store, pdf).kind == "page"
 
 
 # ── queueing ─────────────────────────────────────────────────────────────────

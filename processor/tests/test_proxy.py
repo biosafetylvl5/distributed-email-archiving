@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import socket
 import socketserver
+import ssl
 import threading
 from collections.abc import Iterator
 
@@ -180,3 +182,111 @@ def test_unreachable_upstream_is_a_502(monkeypatch: pytest.MonkeyPatch) -> None:
         reply = _ask(p.start(), b"GET http://news.example.org/ HTTP/1.1\r\n\r\n")
     assert reply.startswith(b"HTTP/1.1 502")
     assert p.stats.to_json()["failed"] == 1
+
+
+# ── missing intermediate certificates ───────────────────────────────────────
+
+
+def _der(tag: int, body: bytes) -> bytes:
+    n = len(body)
+    length = bytes([n]) if n < 0x80 else bytes([0x82]) + n.to_bytes(2)
+    return bytes([tag]) + length + body
+
+
+def _name(cn: bytes) -> bytes:
+    return _der(0x30, _der(0x31, _der(0x30, _der(0x0C, cn))))
+
+
+def _cert(issuer: bytes, subject: bytes, extra: bytes = b"") -> bytes:
+    tbs = (
+        _der(0xA0, _der(0x02, b"\x02")) + _der(0x02, b"\x01") + _der(0x30, b"")
+        + _name(issuer) + _der(0x30, b"") + _name(subject) + extra
+    )  # fmt: skip
+    return _der(0x30, _der(0x30, tbs) + _der(0x30, b"") + _der(0x03, b"\x00"))
+
+
+def _aia(url: bytes) -> bytes:
+    return _der(0x30, proxy_mod._CA_ISSUERS + _der(0x86, url))
+
+
+LEAF = _cert(b"Example CA", b"news.example.org", _aia(b"http://ca.example.com/int.crt"))
+INTERMEDIATE = _cert(b"Example Root", b"Example CA")
+ROOT = _cert(b"Example Root", b"Example Root")
+
+
+def test_reads_the_issuer_url_from_a_certificate() -> None:
+    assert proxy_mod.ca_issuers(LEAF) == ["http://ca.example.com/int.crt"]
+    assert proxy_mod.ca_issuers(_cert(b"a", b"b", _aia(b"ldap://ca.example.com/x"))) == []
+    assert proxy_mod.ca_issuers(b"\x30\x00") == []
+
+
+def test_tells_roots_from_intermediates() -> None:
+    assert proxy_mod.self_issued(ROOT)
+    assert not proxy_mod.self_issued(INTERMEDIATE)
+    assert proxy_mod.self_issued(b"\x30\x05junk")  # unreadable: never trusted
+
+
+class _Ctx:
+    def __init__(self) -> None:
+        self.check_hostname, self.verify_mode = True, ssl.CERT_REQUIRED
+        self.verify_flags = ssl.VERIFY_X509_PARTIAL_CHAIN
+        self.cadata: bytes | None = None
+
+    def load_verify_locations(self, cadata: bytes) -> None:
+        self.cadata = cadata
+
+
+def _verify(
+    monkeypatch: pytest.MonkeyPatch, code: int, fetched: bytes | None,
+    asked: list[str] | None = None,
+) -> tuple[list[_Ctx], list[str]]:  # fmt: skip
+    contexts: list[_Ctx] = []
+    asked = [] if asked is None else asked
+
+    async def handshake(host: str, addr: IPAddress, port: int, ctx: _Ctx, t: float) -> bytes:
+        contexts.append(ctx)
+        if ctx.verify_mode == ssl.CERT_NONE:
+            return LEAF
+        if ctx.cadata == INTERMEDIATE:
+            return LEAF
+        exc = ssl.SSLCertVerificationError("certificate verify failed")
+        exc.verify_code = code
+        raise exc
+
+    def issuers(url: str) -> bytes | None:
+        asked.append(url)
+        return fetched
+
+    monkeypatch.setattr(proxy_mod, "_handshake", handshake)
+    asyncio.run(
+        proxy_mod.verify_tls(
+            "news.example.org",
+            LOOPBACK,
+            issuers=issuers,
+            context=_Ctx,  # type: ignore[arg-type]
+        )
+    )
+    return contexts, asked
+
+
+def test_fetches_a_missing_intermediate(monkeypatch: pytest.MonkeyPatch) -> None:
+    contexts, asked = _verify(monkeypatch, 20, INTERMEDIATE)
+    assert asked == ["http://ca.example.com/int.crt"]
+    last = contexts[-1]
+    assert last.cadata == INTERMEDIATE and last.verify_mode == ssl.CERT_REQUIRED
+    # it links the chain to a trusted root; it can't be one
+    assert not last.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN
+
+
+def test_never_takes_a_root_from_the_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ssl.SSLCertVerificationError):
+        _verify(monkeypatch, 20, ROOT)
+    with pytest.raises(ssl.SSLCertVerificationError):
+        _verify(monkeypatch, 20, None)
+
+
+def test_other_certificate_errors_fetch_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: list[str] = []
+    with pytest.raises(ssl.SSLCertVerificationError):
+        _verify(monkeypatch, 10, INTERMEDIATE, asked)  # expired
+    assert asked == []

@@ -52,6 +52,8 @@ class LinkRecord:
     http_status: int | None = None
     stopped_at_auth: bool = False
     error: str | None = None
+    # its destination didn't answer plain HTTP: queued for the browser (see resolve.py)
+    browser: bool = False
 
 
 def link_counts(doc: dict[str, Any] | None) -> dict[str, int]:
@@ -125,7 +127,7 @@ def _link_record(
         content_type = None
     else:
         r = resolve(link.fetch_url or link.href, resolver, pacer)
-        rec.outcome, rec.chain, rec.error = r.outcome, r.chain[1:], r.error
+        rec.outcome, rec.chain, rec.error, rec.browser = r.outcome, r.chain[1:], r.error, r.browser
         rec.canonical, rec.http_status = r.canonical, r.http_status
         rec.stopped_at_auth = r.stopped_at_auth
         content_type = r.content_type
@@ -136,6 +138,8 @@ def _link_record(
     if rec.canonical:
         rec.h = url_hash(rec.canonical)
         rec.kind = guess_kind(rec.canonical, content_type)
+        if rec.browser and rec.kind == "direct":
+            rec.kind = "page"  # a file there is fetched the same way; only the browser gets through
         if rec.h not in queued:
             queued[rec.h] = queue(store, rec.canonical, rec.kind, now, subscription)
         rec.queued = queued[rec.h]
