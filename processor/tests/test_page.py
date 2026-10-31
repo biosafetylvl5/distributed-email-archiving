@@ -82,13 +82,15 @@ def offline_guard(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_crawl_args_keep_the_browser_behind_the_proxy(tmp_path: Path) -> None:
-    args = crawl_args(URL, tmp_path, 4321, "dea-capture/0")
+    args = crawl_args(URL, tmp_path, 4321)
     assert args[:3] == ["crawl", "--url", URL]
     assert args[args.index("--proxyServer") + 1] == "http://127.0.0.1:4321"
     assert "--extraChromeArgs=--proxy-bypass-list=<-loopback>" in args
     assert args[args.index("--scopeType") + 1] == "page"
     assert args[args.index("--limit") + 1] == "1"
     assert args[args.index("--cwd") + 1] == str(tmp_path)
+    # the crawler's plain Chrome user agent: bot protection blocks anything that names us
+    assert not any(a.startswith("--userAgent") for a in args)
 
 
 def test_read_wacz(tmp_path: Path) -> None:
@@ -232,7 +234,7 @@ def fake_crawl_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_run_crawler(fake_crawl_bin: Path, capfd: pytest.CaptureFixture[str]) -> None:
     work = fake_crawl_bin / "work"
     work.mkdir()
-    c = page.run_crawler(URL, work, GuardProxy(verify=None), "dea-capture/0")
+    c = page.run_crawler(URL, work, GuardProxy(verify=None))
     assert c.exit_code == 0
     assert c.page is not None and c.page["status"] == 200
     assert c.wacz is not None and c.wacz.is_file()
@@ -257,7 +259,7 @@ def test_run_crawler_kills_a_hung_crawl(
     monkeypatch.setattr(page, "KILL_AFTER", 1)
     work = fake_crawl_bin / "work"
     work.mkdir()
-    c = page.run_crawler(URL, work, GuardProxy(verify=None), "dea-capture/0")
+    c = page.run_crawler(URL, work, GuardProxy(verify=None))
     assert c.exit_code is None
     assert c.page is None and c.wacz is None
 

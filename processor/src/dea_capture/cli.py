@@ -133,7 +133,7 @@ def _cmd_capture(args: argparse.Namespace) -> int:
 
 def _page_crawler(blocked: list[IPNetwork]) -> Callable[[str], page.PageOutcome]:
     def crawler(url: str, workdir: Path) -> page.Crawl:
-        return page.run_crawler(url, workdir, GuardProxy(extra_blocked=blocked), _user_agent())
+        return page.run_crawler(url, workdir, GuardProxy(extra_blocked=blocked))
 
     return lambda url: page.crawl_page(url, crawler, blocked)
 

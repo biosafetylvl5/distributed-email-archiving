@@ -70,7 +70,7 @@ class Crawl:
 Crawler = Callable[[str, Path], Crawl]
 
 
-def crawl_args(url: str, workdir: Path, proxy_port: int, user_agent_suffix: str) -> list[str]:
+def crawl_args(url: str, workdir: Path, proxy_port: int) -> list[str]:
     return [
         CRAWL, "--url", url, "--scopeType", "page", "--limit", "1", "--workers", "1",
         "--headless", "--generateWACZ", "--screenshot", "view", "--text", "to-pages,final-to-warc",
@@ -80,7 +80,9 @@ def crawl_args(url: str, workdir: Path, proxy_port: int, user_agent_suffix: str)
         "--proxyServer", f"http://127.0.0.1:{proxy_port}",
         # without this the browser reaches localhost directly
         "--extraChromeArgs=--proxy-bypass-list=<-loopback>",
-        "--userAgentSuffix", user_agent_suffix,
+        # The crawler's own user agent, a plain Chrome one. Sites behind bot
+        # protection cut the connection (ERR_HTTP2_PROTOCOL_ERROR) when a
+        # suffix names us, as they do for "HeadlessChrome".
     ]  # fmt: skip
 
 
@@ -177,14 +179,14 @@ def log_errors(log: Path) -> str | None:
     return joined if len(joined) <= LOG_ERRORS_MAX else joined[: LOG_ERRORS_MAX - 1] + "…"
 
 
-def run_crawler(url: str, workdir: Path, proxy: GuardProxy, user_agent_suffix: str) -> Crawl:
+def run_crawler(url: str, workdir: Path, proxy: GuardProxy) -> Crawl:
     """Run browsertrix-crawler on ``url`` behind ``proxy`` (started here)."""
     _become_subreaper()
     port = proxy.start()
     try:
         with (workdir / "crawl.log").open("wb") as log:
             proc = subprocess.Popen(
-                crawl_args(url, workdir, port, user_agent_suffix),
+                crawl_args(url, workdir, port),
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                 cwd=workdir, env=_crawler_env(workdir), start_new_session=True,
             )  # fmt: skip

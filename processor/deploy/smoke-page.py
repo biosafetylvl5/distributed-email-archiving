@@ -57,7 +57,7 @@ threading.Thread(target=local.serve_forever, daemon=True).start()
 local_url = f"http://127.0.0.1:{local.server_address[1]}/"
 
 with tempfile.TemporaryDirectory() as tmp:
-    c = page.run_crawler(local_url, Path(tmp), GuardProxy(), "dea-capture-smoke")
+    c = page.run_crawler(local_url, Path(tmp), GuardProxy())
     loopback = {"exit": c.exit_code, "hits": len(hits), "refused": dict(c.stats.refused)}
     print("loopback", json.dumps(loopback))
     if hits or not c.stats.refused.get("127.0.0.1"):
@@ -67,7 +67,7 @@ assert c.stats.refused.get("127.0.0.1"), "the proxy didn't see the loopback requ
 
 
 def crawler(url: str, workdir: Path) -> page.Crawl:
-    c = page.run_crawler(url, workdir, GuardProxy(), "dea-capture-smoke")
+    c = page.run_crawler(url, workdir, GuardProxy())
     seen = {"exit": c.exit_code, "proxy": c.stats.to_json(), "page": bool(c.page),
             "wacz": bool(c.wacz)}  # fmt: skip
     print("example.com crawl", json.dumps(seen))
