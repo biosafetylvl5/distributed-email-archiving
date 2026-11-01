@@ -209,17 +209,18 @@ def _relinker(store: Store, pacer: HostPacer) -> retry.Relinker:
     return relink
 
 
+def _reconcile(store: S3Store, keys: list[str]) -> None:
+    scheduled = {o.key for o in store.listing("captures/due/")}
+    print(f"RECONCILE repaired={capture.reconcile(store, keys, datetime.now(UTC), scheduled)}")
+
+
 def _cmd_reconcile(args: argparse.Namespace) -> int:
     store = S3Store(_bucket(args.bucket))
-    repaired = capture.reconcile(
-        store, [o.key for o in store.listing("captures/index/")], datetime.now(UTC)
-    )
-    print(f"RECONCILE repaired={repaired}")
+    _reconcile(store, [o.key for o in store.listing("captures/index/")])
     return 0
 
 
 def _cmd_summary(args: argparse.Namespace) -> int:
-    _cmd_reconcile(args)
     store = S3Store(_bucket(args.bucket))
     if not args.no_retries:
         keys = [o.key for o in store.listing(summary.RETRY_REQUESTS)]
@@ -228,6 +229,8 @@ def _cmd_summary(args: argparse.Namespace) -> int:
             done = retry.apply_requests(store, keys, datetime.now(UTC), relink)
             print("RETRY " + json.dumps([{k: v for k, v in r.items() if k != "sha"} for r in done]))
     print(json.dumps(summary.build(store)))
+    # only what the build just saw unfinished: a full pass reads every record
+    _reconcile(store, summary.unfinished(store))
     return 0
 
 

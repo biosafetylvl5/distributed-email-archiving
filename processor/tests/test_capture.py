@@ -720,7 +720,6 @@ def test_reconciler_cli_and_summary_ticker_repair_missing_schedules(
     old = _record(store, PDF).due or ""
     store.delete(old)
     monkeypatch.setattr(cli, "S3Store", lambda bucket: store)
-    monkeypatch.setattr("dea_capture.cli.summary.build", lambda store: {})
     args = [command, "s3://example"] + (["--no-retries"] if command == "summary" else [])
     assert cli.main(args) == 0
     rec = _record(store, PDF)

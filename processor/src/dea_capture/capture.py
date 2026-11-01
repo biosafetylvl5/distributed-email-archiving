@@ -31,7 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -300,7 +300,8 @@ def queue(
 
     def associate(old: CaptureRecord) -> bool:
         changed = _add_sub(old, subscription)
-        if _held_by_limit(old, load_limits(store)):
+        # only deferred records can be held by a limit; skip the limits read otherwise
+        if old.status == "deferred" and _held_by_limit(old, load_limits(store)):
             old.status, old.updated_at = "queued", when
             old.due = fresh_due(old.kind, now, h)
             changed = True
@@ -311,18 +312,18 @@ def queue(
         data = store.get(index_key(h))
         old = CaptureRecord.load(data) if data is not None else rec
     if old.status in {"queued", "retrying"} and old.due and not store.exists(old.due):
-        old = repair_due(store, h, now) or old
+        old = repair_due(store, h, now, load_limits(store), store.exists) or old
     return old.status
 
 
-def repair_due(store: Store, h: str, now: datetime) -> CaptureRecord | None:
+def repair_due(
+    store: Store, h: str, now: datetime, limits: Mapping[str, int], exists: Callable[[str], bool]
+) -> CaptureRecord | None:
     def repair(rec: CaptureRecord) -> bool:
-        released = _held_by_limit(rec, load_limits(store))
+        released = _held_by_limit(rec, limits)
         if released:
             rec.status, rec.updated_at = "queued", _iso(now)
-        elif rec.status not in {"queued", "retrying"} or (
-            rec.due is not None and store.exists(rec.due)
-        ):
+        elif rec.status not in {"queued", "retrying"} or (rec.due is not None and exists(rec.due)):
             return False
         when = now
         if rec.due and not released:
@@ -337,13 +338,19 @@ def repair_due(store: Store, h: str, now: datetime) -> CaptureRecord | None:
     return rec
 
 
-def reconcile(store: Store, keys: list[str], now: datetime) -> int:
-    """Repair interrupted schedules and release captures held by older limits."""
+def reconcile(
+    store: Store, keys: Iterable[str], now: datetime, scheduled: set[str] | None = None
+) -> int:
+    """Repair interrupted schedules and release captures held by older limits.
+    ``scheduled``, the due keys from one listing, saves a HEAD per record."""
+    limits = load_limits(store)
+    exists = store.exists if scheduled is None else scheduled.__contains__
     return sum(
-        repair_due(store, k.removeprefix("captures/index/").removesuffix(".json"), now) is not None
+        repair_due(store, k.removeprefix("captures/index/").removesuffix(".json"), now, limits,
+                   exists) is not None
         for k in keys
         if k.startswith("captures/index/") and k.endswith(".json")
-    )
+    )  # fmt: skip
 
 
 @dataclass

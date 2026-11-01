@@ -185,6 +185,22 @@ def _storage(store: Listable, index: dict[str, dict[str, str]], now: datetime) -
     }
 
 
+UNFINISHED = frozenset({"queued", "retrying", "deferred"})
+
+
+def unfinished(store: Store) -> list[str]:
+    """Capture index keys the last build saw queued, retrying or deferred."""
+    try:
+        index = json.loads(store.get(STATE_KEY) or b"{}").get("index") or {}
+    except (ValueError, AttributeError):
+        return []
+    return [
+        k for k, v in index.items()
+        if isinstance(v, list) and len(v) == 2 and isinstance(v[1], dict)
+        and v[1].get("status") in UNFINISHED
+    ]  # fmt: skip
+
+
 def cache_current(prior: Any, obj: Listed) -> bool:
     return (
         isinstance(prior, list)
